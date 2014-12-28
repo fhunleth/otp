@@ -35,6 +35,7 @@
 
 #define ETHR_NATIVE_IMPL__ "libatomic_ops"
 
+#define AO_REQUIRE_CAS
 #include "atomic_ops.h"
 #include "ethr_membar.h"
 #include "ethr_atomic.h"

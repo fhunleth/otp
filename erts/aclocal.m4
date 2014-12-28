@@ -1414,7 +1414,8 @@ case "$THR_LIB_NAME" in
 	    	    fi;;
 	    esac
 	    ethr_have_libatomic_ops=no
-	    AC_TRY_LINK([#include "atomic_ops.h"],
+	    AC_TRY_LINK([#define AO_REQUIRE_CAS
+                    #include "atomic_ops.h"],
 	    	        [
 	    	    	    volatile AO_t x;
 	    	    	    AO_t y;
@@ -1454,6 +1455,7 @@ case "$THR_LIB_NAME" in
 	        AC_CHECK_SIZEOF(AO_t, ,
 	    	    	        [
 	    	    	    	    #include <stdio.h>
+	    	    	    	    #define AO_REQUIRE_CAS
 	    	    	    	    #include "atomic_ops.h"
 	    	    	        ])
 	        AC_DEFINE_UNQUOTED(ETHR_SIZEOF_AO_T, $ac_cv_sizeof_AO_t, [Define to the size of AO_t if libatomic_ops is used])
