@@ -2553,7 +2553,6 @@ erl_start(int argc, char **argv)
         erts_proc_inc_refc(erts_trace_cleaner);
 
     }
-
     erts_start_schedulers();
 
 #ifdef ERTS_ENABLE_LOCK_COUNT
