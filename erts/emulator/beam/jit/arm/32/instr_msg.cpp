@@ -112,7 +112,7 @@ void BeamGlobalAssembler::emit_i_loop_rec_shared() {
     a.ldr(TMP, flags);
     a.orr(TMP, TMP, imm(F_DELAY_GC));
     a.str(TMP, flags);
-    a.str(ARG1, arm::Mem(c_p, offsetof(Process, i)));
+    safe_str(ARG1, arm::Mem(c_p, offsetof(Process, i)));
     a.str(ARG2, await_addr);
 
     a.bind(restart);
@@ -126,7 +126,7 @@ void BeamGlobalAssembler::emit_i_loop_rec_shared() {
     comment("Peek next message");
     a.bind(peek_message);
     {
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, sig_qs.save)));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, sig_qs.save)));
         a.ldr(ARG1, arm::Mem(TMP));
         emit_branch_if_ne(ARG1, 0, check_is_distributed);
         comment("Inner queue empty, fetch more from outer/middle queues");
@@ -188,8 +188,8 @@ void BeamGlobalAssembler::emit_i_loop_rec_shared() {
         a.bic(TMP, TMP, imm(F_DELAY_GC));
         a.str(TMP, flags);
         mov_imm(TMP, 0);
-        a.strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
-        a.str(TMP, arm::Mem(c_p, offsetof(Process, current)));
+        safe_strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
+        safe_str(TMP, arm::Mem(c_p, offsetof(Process, current)));
 
         a.b(labels[do_schedule]);
     }

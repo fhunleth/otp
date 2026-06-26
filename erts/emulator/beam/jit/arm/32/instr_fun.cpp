@@ -187,7 +187,7 @@ void BeamModuleAssembler::emit_i_lambda_trampoline(const ArgLambda &Lambda,
         ssize_t i;
 
         emit_ptr_val(ARG4, ARG4);
-        a.add(ARG4, ARG4, imm(env_offset));
+        add(ARG4, ARG4, env_offset);
 
         for (i = fun_arity; i < total_arity - 1; i += 2) {
             auto first = init_destination(ArgXRegister(i), VAR);

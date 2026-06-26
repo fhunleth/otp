@@ -263,7 +263,7 @@ void BeamGlobalAssembler::emit_i_length_common(Label fail, int state_size) {
     {
         a.ldr(ARG2, TMP_MEM1q);
         a.ldr(ARG3, TMP_MEM2q);
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
         a.cmp(TMP, imm(TRAP));
         a.b_ne(fail);
 
@@ -272,11 +272,11 @@ void BeamGlobalAssembler::emit_i_length_common(Label fail, int state_size) {
 
         /* The trap state is stored in the registers above the current live
          * ones, so we add the state size (in words) to keep it alive. */
-        a.add(ARG2, ARG2, imm(state_size));
+        add(ARG2, ARG2, state_size);
 
         mov_imm(TMP, 0);
-        a.str(TMP, arm::Mem(c_p, offsetof(Process, current)));
-        a.strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
+        safe_str(TMP, arm::Mem(c_p, offsetof(Process, current)));
+        safe_strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
 
         /* We'll find our way back through the entry address (ARG3). */
         a.b(labels[context_switch_simplified]);
@@ -390,7 +390,7 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
     Label trace = a.newLabel(), yield = a.newLabel(), skip_trace = a.newLabel();
 
     /* Spill everything we may need on the error and GC paths. */
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, mbuf)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, mbuf)));
     a.str(TMP, mbuf_mem);
     lea(TMP, TMP_MEM1q);
     a.stmia(arm::Mem(TMP), a32::GpList({ARG3, ARG4}));
@@ -456,13 +456,13 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
             Label check_fragments = a.newLabel();
 
             /* Test whether GC is forced. */
-            a.ldr(TMP, arm::Mem(c_p, offsetof(Process, flags)));
+            safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, flags)));
             a.tst(TMP, imm(F_FORCE_GC | F_DISABLE_GC));
             a.b_ne(gc_after_bif_call);
 
             /* Test if binary heap size should trigger GC. */
-            a.ldr(TMP, arm::Mem(c_p, offsetof(Process, bin_vheap_sz)));
-            a.ldr(VAR, arm::Mem(c_p, offsetof(Process, off_heap.overhead)));
+            safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, bin_vheap_sz)));
+            safe_ldr(VAR, arm::Mem(c_p, offsetof(Process, off_heap.overhead)));
             a.cmp(VAR, TMP);
             a.b_ls(check_fragments);
             a.b(gc_after_bif_call);
@@ -470,7 +470,7 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
             /* Test if heap fragment size is larger than remaining heap size. */
             a.bind(check_fragments);
             a.sub(TMP, E, HTOP);
-            a.ldr(VAR, arm::Mem(c_p, offsetof(Process, mbuf_sz)));
+            safe_ldr(VAR, arm::Mem(c_p, offsetof(Process, mbuf_sz)));
             a.lsl(VAR, VAR, imm(3));
             a.cmp(TMP, VAR);
             a.b_lo(gc_after_bif_call);
@@ -487,13 +487,13 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
 
             a.bind(trap);
             {
-                a.ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
+                safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
                 a.cmp(TMP, imm(TRAP));
                 a.b_ne(error);
 
                 /* Trap out, preserving our continuation on the Erlang stack. */
                 emit_enter_erlang_frame();
-                a.ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+                safe_ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
                 a.b(labels[context_switch_simplified]);
             }
 
@@ -541,8 +541,8 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
     {
         a.ldrb(ARG2, arm::Mem(ARG4, offsetof(Export, info.mfa.arity)));
         add(ARG4, ARG4, offsetof(Export, info.mfa));
-        a.strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
-        a.str(ARG4, arm::Mem(c_p, offsetof(Process, current)));
+        safe_strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
+        safe_str(ARG4, arm::Mem(c_p, offsetof(Process, current)));
 
         /* We'll find our way back through ARG3 (entry address). */
         a.b(labels[context_switch_simplified]);
@@ -606,27 +606,27 @@ void BeamGlobalAssembler::emit_bif_nif_epilogue(void) {
 
     if (erts_alcu_enable_code_atags) {
         /* See emit_i_test_yield. */
-        a.str(a32::lr, arm::Mem(c_p, offsetof(Process, i)));
+        safe_str(a32::lr, arm::Mem(c_p, offsetof(Process, i)));
     }
     
     a.bx(a32::lr);
 
     a.bind(check_trap);
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, freason)));
     a.cmp(TMP, imm(TRAP));
     a.b_ne(error);
     {
         comment("yield");
 
         comment("test trap to hibernate");
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, flags)));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, flags)));
         a.tst(TMP, imm(F_HIBERNATE_SCHED));
         a.b_eq(trap);
 
         comment("do hibernate trap");
         mov_imm(VAR, ~F_HIBERNATE_SCHED);
         a.and_(TMP, TMP, VAR);
-        a.str(TMP, arm::Mem(c_p, offsetof(Process, flags)));
+        safe_str(TMP, arm::Mem(c_p, offsetof(Process, flags)));
         a.b(labels[do_schedule]);
     }
 
@@ -636,7 +636,7 @@ void BeamGlobalAssembler::emit_bif_nif_epilogue(void) {
 
         /* The BIF_TRAP macros all set up c_p->arity and c_p->current, so we
          * can use a simplified context switch. */
-        a.ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+        safe_ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
         a.b(labels[context_switch_simplified]);
     }
 
@@ -652,7 +652,7 @@ void BeamGlobalAssembler::emit_bif_nif_epilogue(void) {
         emit_leave_runtime();
 
         a.mov(ARG2, ARG1);
-        a.ldr(ARG4, arm::Mem(c_p, offsetof(Process, current)));
+        safe_ldr(ARG4, arm::Mem(c_p, offsetof(Process, current)));
         a.b(labels[raise_exception_shared]);
     }
 }
@@ -671,12 +671,12 @@ void BeamGlobalAssembler::emit_call_bif_shared(void) {
      * `c_p->arity`. */
 
     emit_enter_runtime_frame();
-    a.str(ARG2, arm::Mem(c_p, offsetof(Process, current)));
+    safe_str(ARG2, arm::Mem(c_p, offsetof(Process, current)));
 
     a.ldr(TMP, arm::Mem(ARG2, offsetof(ErtsCodeMFA, arity)));
     a.mov(VAR, TMP);
-    a.strb(VAR, arm::Mem(c_p, offsetof(Process, arity)));
-    a.str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+    safe_strb(VAR, arm::Mem(c_p, offsetof(Process, arity)));
+    safe_str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
  
     /* The corresponding leave can be found in the epilogue. */
     emit_enter_runtime<Update::eStack | Update::eHeap |
@@ -710,7 +710,7 @@ void BeamGlobalAssembler::emit_call_bif_shared(void) {
 void BeamGlobalAssembler::emit_dispatch_bif(void) {
     /* c_p->i points into the trampoline of a ErtsNativeFunc, right after the
      * `info` structure. */
-    a.ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+    safe_ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
     
     
     ERTS_CT_ASSERT(offsetof(ErtsNativeFunc, trampoline.call_bif_nif) ==
@@ -719,7 +719,7 @@ void BeamGlobalAssembler::emit_dispatch_bif(void) {
     ssize_t mfa_offset = offsetof(ErtsNativeFunc, trampoline.call_bif_nif) -
                          offsetof(ErtsNativeFunc, trampoline.info.mfa);
 
-    a.sub(ARG2, ARG3, imm(mfa_offset));
+    sub(ARG2, ARG3, mfa_offset);
 
     ssize_t dfunc_offset = offsetof(ErtsNativeFunc, trampoline.dfunc) -
                            offsetof(ErtsNativeFunc, trampoline.call_bif_nif);
@@ -747,7 +747,7 @@ void BeamModuleAssembler::emit_call_bif_mfa(const ArgAtom &M,
     func = (BeamInstr)bif_table[e->bif_number].f;
 
     a.adr(ARG3, current_label);
-    a.sub(ARG2, ARG3, imm(sizeof(ErtsCodeMFA)));
+    sub(ARG2, ARG3, sizeof(ErtsCodeMFA));
     comment("HBIF: %T:%T/%d",
             e->info.mfa.module,
             e->info.mfa.function,
@@ -759,7 +759,7 @@ void BeamModuleAssembler::emit_call_bif_mfa(const ArgAtom &M,
 
 void BeamGlobalAssembler::emit_call_nif_early() {
     a.mov(ARG2, a32::lr);
-    a.sub(ARG2, ARG2, imm(BEAM_ASM_FUNC_PROLOGUE_SIZE + sizeof(ErtsCodeInfo)));
+    sub(ARG2, ARG2, BEAM_ASM_FUNC_PROLOGUE_SIZE + sizeof(ErtsCodeInfo));
 
     emit_enter_runtime();
 
@@ -820,7 +820,7 @@ void BeamGlobalAssembler::emit_dispatch_nif(void) {
      *
      * ErtsNativeFunc follows the call_nif layout, so we don't need to do
      * anything beyond loading the address. */
-    a.ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+    safe_ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
     a.b(labels[call_nif_shared]);
 }
 
@@ -829,7 +829,7 @@ void BeamGlobalAssembler::emit_call_nif_yield_helper() {
 
     if (erts_alcu_enable_code_atags) {
         /* See emit_i_test_yield. */
-        a.str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+        safe_str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
     }
 
     a.subs(FCALLS, FCALLS, imm(1));
@@ -842,14 +842,14 @@ void BeamGlobalAssembler::emit_call_nif_yield_helper() {
         int arity_offset = offsetof(ErtsCodeMFA, arity) - mfa_offset;
 
         a.ldrb(TMP, arm::Mem(ARG3, arity_offset));
-        a.strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
+        safe_strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
 
-        a.sub(TMP, ARG3, imm(mfa_offset));
-        a.str(TMP, arm::Mem(c_p, offsetof(Process, current)));
+        sub(TMP, ARG3, mfa_offset);
+        safe_str(TMP, arm::Mem(c_p, offsetof(Process, current)));
 
         /* Yield to `dispatch` rather than `entry` to avoid pushing too many
          * frames to the stack. See `emit_call_nif` for details. */
-        a.add(ARG3, ARG3, imm(BEAM_ASM_NFUNC_SIZE + sizeof(UWord[3])));
+        add(ARG3, ARG3, BEAM_ASM_NFUNC_SIZE + sizeof(UWord[3]));
         a.b(labels[context_switch_simplified]);
     }
 }

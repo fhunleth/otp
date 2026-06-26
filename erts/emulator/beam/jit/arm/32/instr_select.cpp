@@ -26,11 +26,17 @@
 using namespace asmjit;
 
 template<typename T>
-static constexpr bool isInt13(T value) {
+static bool canEncodeAArch32Imm(T value) {
+    uint32_t encoded;
+    return arm::Utils::encodeAArch32Imm(value, &encoded);
+}
+
+template<typename T>
+static bool isInt13(T value) {
     typedef typename std::make_unsigned<T>::type U;
     typedef typename std::make_signed<T>::type S;
 
-    return Support::isUInt12(U(value)) || Support::isUInt12(-S(value));
+    return canEncodeAArch32Imm(U(value)) || canEncodeAArch32Imm(-S(value));
 }
 
 /* The `cmp`/`cmn` instructions in AArch64 only accept 12-bit unsigned immediate
@@ -424,7 +430,7 @@ void BeamModuleAssembler::emit_i_jump_on_val(const ArgSource &Src,
     a.asr(TMP, TMP, imm(_TAG_IMMED1_SIZE));
 
     if (Base.get() != 0) {
-        if (Support::isUInt12((Sint)Base.get())) {
+        if (canEncodeAArch32Imm(Base.get())) {
             a.sub(TMP, TMP, imm(Base.get()));
         } else {
             mov_imm(VAR, Base.get());

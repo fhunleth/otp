@@ -26,6 +26,11 @@ extern "C"
 #include "big.h"
 }
 
+static bool canEncodeAArch32Imm(Uint value) {
+    uint32_t encoded;
+    return arm::Utils::encodeAArch32Imm(value, &encoded);
+}
+
 void BeamModuleAssembler::emit_add_sub_types(bool is_small_result,
                                              const ArgSource &LHS,
                                              const a32::Gp lhs_reg,
@@ -148,8 +153,10 @@ void BeamModuleAssembler::emit_i_plus(const ArgLabel &Fail,
                                       const ArgSource &LHS,
                                       const ArgSource &RHS,
                                       const ArgRegister &Dst) {
-    bool rhs_is_arm_literal =
-            RHS.isSmall() && Support::isUInt12(RHS.as<ArgSmall>().get());
+    bool rhs_is_arm_literal = RHS.isSmall() &&
+                              canEncodeAArch32Imm(
+                                      RHS.as<ArgSmall>().get() &
+                                      ~_TAG_IMMED1_MASK);
     bool is_small_result = is_sum_small_if_args_are_small(LHS, RHS);
 
     if (always_small(LHS) && always_small(RHS) && is_small_result) {
@@ -341,8 +348,10 @@ void BeamModuleAssembler::emit_i_minus(const ArgLabel &Fail,
                                        const ArgSource &LHS,
                                        const ArgSource &RHS,
                                        const ArgRegister &Dst) {
-    bool rhs_is_arm_literal =
-            RHS.isSmall() && Support::isUInt12(RHS.as<ArgSmall>().get());
+    bool rhs_is_arm_literal = RHS.isSmall() &&
+                              canEncodeAArch32Imm(
+                                      RHS.as<ArgSmall>().get() &
+                                      ~_TAG_IMMED1_MASK);
     bool is_small_result = is_diff_small_if_args_are_small(LHS, RHS);
 
     if (always_small(LHS) && always_small(RHS) && is_small_result) {

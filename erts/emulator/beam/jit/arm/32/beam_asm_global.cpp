@@ -103,11 +103,11 @@ void BeamGlobalAssembler::emit_garbage_collect() {
      * twice. */
     a.sub(ARG2, ARG3, HTOP);
     a.lsr(ARG2, ARG2, imm(2));
-    a.sub(ARG2, ARG2, imm(S_RESERVED));
+    sub(ARG2, ARG2, S_RESERVED);
 
     /* Save our return address in c_p->i so we can tell where we crashed if we
      * did so during GC. */
-    a.str(a32::lr, arm::Mem(c_p, offsetof(Process, i)));
+    safe_str(a32::lr, arm::Mem(c_p, offsetof(Process, i)));
 
     emit_enter_runtime<Update::eStack | Update::eHeap>();
 
@@ -125,7 +125,7 @@ void BeamGlobalAssembler::emit_garbage_collect() {
     emit_leave_runtime<Update::eStack | Update::eHeap>();
     emit_leave_runtime_frame();
 
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, state.value)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, state.value)));
     a.tst(TMP, imm(ERTS_PSFLG_EXITING));
     a.b_ne(labels[do_schedule]);
 
@@ -142,7 +142,7 @@ void BeamGlobalAssembler::emit_garbage_collect() {
  *
  * Assumes that c_p->current points into the MFA of an export entry. */
 void BeamGlobalAssembler::emit_bif_export_trap() {
-    a.ldr(ARG1, arm::Mem(c_p, offsetof(Process, current)));
+    safe_ldr(ARG1, arm::Mem(c_p, offsetof(Process, current)));
     sub(ARG1, ARG1, offsetof(Export, info.mfa));
 
     emit_leave_erlang_frame();
@@ -187,7 +187,7 @@ void BeamGlobalAssembler::emit_export_trampoline() {
         ssize_t func_offset = offsetof(Export, trampoline.bif.address);
 
         lea(ARG2, arm::Mem(ARG1, offsetof(Export, info.mfa)));
-        a.ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+        safe_ldr(ARG3, arm::Mem(c_p, offsetof(Process, i)));
         a.ldr(ARG4, arm::Mem(ARG1, func_offset));
 
         /* `call_bif_shared` assumes that the return address has been pushed to

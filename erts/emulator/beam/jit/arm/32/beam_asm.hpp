@@ -165,7 +165,7 @@ protected:
         const int margin_bytes = margin_words * sizeof(Eterm);
         Label next = a.newLabel();
 
-        a.sub(TMP, E, imm(margin_bytes));
+        sub(TMP, E, margin_bytes);
         a.cmp(HTOP, TMP);
 
         a.b_ls(next);
@@ -330,23 +330,23 @@ protected:
         ERTS_CT_ASSERT((Spec & (Update::eReductions | Update::eStack |
                                 Update::eHeap)) == Spec);
         if (Spec & Update::eStack) {
-            a.str(E, arm::Mem(c_p, offsetof(Process, stop)));
+            this->safe_str(E, arm::Mem(c_p, offsetof(Process, stop)));
         } else {
 #ifdef DEBUG
         /* Store some garbage in the process structure to catch missing
          * updates. */
-        a.str(active_code_ix, arm::Mem(c_p, offsetof(Process, stop)));
+        this->safe_str(active_code_ix, arm::Mem(c_p, offsetof(Process, stop)));
 #endif
         }
         if (Spec & Update::eHeap) {
-            a.str(HTOP, arm::Mem(c_p, offsetof(Process, htop)));
+            this->safe_str(HTOP, arm::Mem(c_p, offsetof(Process, htop)));
         } else {
 #ifdef DEBUG
-            a.str(active_code_ix, arm::Mem(c_p, offsetof(Process, htop)));
+            this->safe_str(active_code_ix, arm::Mem(c_p, offsetof(Process, htop)));
 #endif
         }
         if (Spec & Update::eReductions) {
-            a.str(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
+            this->safe_str(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
         }
         // We do not have any X register cached in machine registers
         // so nothing else needs to be saved.
@@ -358,13 +358,13 @@ protected:
             (Spec & (Update::eReductions | Update::eStack | Update::eHeap |
                      Update::eCodeIndex)) == Spec);
         if (Spec & Update::eStack) {
-            a.ldr(E, arm::Mem(c_p, offsetof(Process, stop)));
+            this->safe_ldr(E, arm::Mem(c_p, offsetof(Process, stop)));
         }
         if (Spec & Update::eHeap) {
-            a.ldr(HTOP, arm::Mem(c_p, offsetof(Process, htop)));
+            this->safe_ldr(HTOP, arm::Mem(c_p, offsetof(Process, htop)));
         }
         if (Spec & Update::eReductions) {
-            a.ldr(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
+            this->safe_ldr(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
         }
 
         if (Spec & Update::eCodeIndex) {
@@ -444,7 +444,7 @@ protected:
     }
 
     void emit_branch_if_eq(a32::Gp reg, Uint value, Label lbl) {
-        if (value <= 255) {
+        if (isAArch32Immediate(value)) {
             a.cmp(reg, imm(value));
         } else {
             mov_imm(TMP, value);
@@ -454,7 +454,7 @@ protected:
     }
 
     void emit_branch_if_ne(a32::Gp reg, Uint value, Label lbl) {
-        if (value <= 255) {
+        if (isAArch32Immediate(value)) {
             a.cmp(reg, imm(value));
         } else {
             mov_imm(TMP, value);
@@ -512,12 +512,17 @@ protected:
         mov_imm(to, 0);
     }
 
+    static bool isAArch32Immediate(uint64_t value) {
+        uint32_t encoded;
+        return arm::Utils::encodeAArch32Imm(value, &encoded);
+    }
+
     void sub(a32::Gp to, a32::Gp src, int64_t val) {
         if (val < 0) {
             add(to, src, -val);
         } else if (val == 0 && to != src) {
             a.mov(to, src);
-        } else if (val <= 255) {
+        } else if (isAArch32Immediate(val)) {
             a.sub(to, src, imm(val));
         } else {
             ASSERT(src != TMP);
@@ -531,7 +536,7 @@ protected:
             sub(to, src, -val);
         } else if (val == 0 && to != src) {
             a.mov(to, src);
-        } else if (val <= 255) {
+        } else if (isAArch32Immediate(val)) {
             a.add(to, src, imm(val));
         } else {
             ASSERT(src != TMP);
@@ -541,14 +546,86 @@ protected:
     }
 
     void subs(a32::Gp to, a32::Gp src, int64_t val) {
-        if (val >= 0 && val <= 255) {
+        if (val >= 0 && isAArch32Immediate(val)) {
             a.subs(to, src, imm(val));
-        } else if (val < 0 && -val <= 255) {
+        } else if (val < 0 && isAArch32Immediate(-val)) {
             a.adds(to, src, imm(-val));
         } else {
             ASSERT(src != TMP);
             mov_imm(TMP, val);
             a.subs(to, src, TMP);
+        }
+    }
+
+    void safe_str(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+        constexpr size_t max_disp = 4095;
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= max_disp) {
+            a.str(gp, mem);
+        } else {
+            a32::Gp addr = (gp != TMP) ? TMP : VAR;
+            ASSERT(addr != gp);
+            add(addr, a32::Gp(mem.baseId()), offset);
+            a.str(gp, arm::Mem(addr));
+        }
+    }
+
+    void safe_ldr(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+        constexpr size_t max_disp = 4095;
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= max_disp) {
+            a.ldr(gp, mem);
+        } else {
+            a32::Gp addr = (gp != TMP) ? TMP : VAR;
+            ASSERT(addr != gp);
+            add(addr, a32::Gp(mem.baseId()), offset);
+            a.ldr(gp, arm::Mem(addr));
+        }
+    }
+
+    void safe_strb(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+        constexpr size_t max_disp = 4095;
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= max_disp) {
+            a.strb(gp, mem);
+        } else {
+            a32::Gp addr = (gp != TMP) ? TMP : VAR;
+            ASSERT(addr != gp);
+            add(addr, a32::Gp(mem.baseId()), offset);
+            a.strb(gp, arm::Mem(addr));
+        }
+    }
+
+    void safe_ldrb(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+        constexpr size_t max_disp = 4095;
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= max_disp) {
+            a.ldrb(gp, mem);
+        } else {
+            a32::Gp addr = (gp != TMP) ? TMP : VAR;
+            ASSERT(addr != gp);
+            add(addr, a32::Gp(mem.baseId()), offset);
+            a.ldrb(gp, arm::Mem(addr));
         }
     }
 
@@ -1481,6 +1558,42 @@ protected:
             ASSERT(addr != gp);
             add(addr, a32::Gp(mem.baseId()), offset);
             a.str(gp, arm::Mem(addr));
+        }
+    }
+
+    void safe_ldrb(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= disp4KB) {
+            preserve_cache(
+                    [&]() {
+                        a.ldrb(gp, mem);
+                    },
+                    gp);
+        } else {
+            add(TMP, a32::Gp(mem.baseId()), offset);
+            a.ldrb(gp, arm::Mem(TMP));
+        }
+    }
+
+    void safe_strb(a32::Gp gp, arm::Mem mem) {
+        size_t abs_offset = std::abs(mem.offset());
+        auto offset = mem.offset();
+
+        ASSERT(mem.hasBaseReg() && !mem.hasIndex());
+        ASSERT(gp.isGp());
+
+        if (abs_offset <= disp4KB) {
+            a.strb(gp, mem);
+        } else {
+            a32::Gp addr = (gp != TMP) ? TMP : VAR;
+            ASSERT(addr != gp);
+            add(addr, a32::Gp(mem.baseId()), offset);
+            a.strb(gp, arm::Mem(addr));
         }
     }
 

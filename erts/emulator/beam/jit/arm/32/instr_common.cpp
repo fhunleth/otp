@@ -72,15 +72,15 @@ using namespace asmjit;
 
 void BeamModuleAssembler::emit_error(int reason) {
     mov_imm(TMP, reason);
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, freason)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, freason)));
     emit_raise_exception();
 }
 
 void BeamModuleAssembler::emit_error(int reason, const ArgSource &Src) {
     mov_imm(TMP, reason);
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, freason)));    
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, freason)));    
     auto src = load_source(Src, TMP);
-    a.str(src.reg, arm::Mem(c_p, offsetof(Process, fvalue)));
+    safe_str(src.reg, arm::Mem(c_p, offsetof(Process, fvalue)));
     emit_raise_exception();
 }
 
@@ -249,9 +249,9 @@ void BeamModuleAssembler::emit_normal_exit() {
     emit_proc_lc_unrequire();
 
     mov_imm(TMP, EXC_NORMAL);
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, freason)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, freason)));
     mov_imm(TMP, 0);
-    a.strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
+    safe_strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
     a.mov(ARG1, c_p);
     mov_imm(ARG2, am_normal);
     runtime_call<2>(erts_do_exit_process);
@@ -945,7 +945,7 @@ void BeamModuleAssembler::emit_update_record_in_place(
             emit_is_not_boxed(update, value.reg);
         }
 
-        a.ldr(ARG4, arm::Mem(c_p, offsetof(Process, high_water)));
+        safe_ldr(ARG4, arm::Mem(c_p, offsetof(Process, high_water)));
         a.cmp(untagged_src, HTOP);
         a.b_hs(copy);
         a.cmp(untagged_src, ARG4);
@@ -2369,9 +2369,9 @@ void BeamModuleAssembler::emit_badrecord(const ArgSource &Src) {
 
 void BeamModuleAssembler::emit_catch(const ArgYRegister &Y,
                                      const ArgCatch &Handler) {
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     a.add(TMP, TMP, imm(1));
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
 
     mov_arg(Y, Handler);
 }
@@ -2456,17 +2456,17 @@ void BeamModuleAssembler::emit_catch_end(const ArgYRegister &CatchTag) {
 }
 
 void BeamModuleAssembler::emit_try_end(const ArgYRegister &CatchTag) {
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     a.sub(TMP, TMP, imm(1));
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     mov_imm(TMP, NIL);
     a.str(TMP, getArgRef(CatchTag));
 }
 
 void BeamModuleAssembler::emit_try_end_deallocate(const ArgWord &Deallocate) {
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     a.sub(TMP, TMP, imm(1));
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     if (Deallocate.get() > 0) {
         add(E, E, Deallocate.get() * sizeof(Eterm));
     }
@@ -2476,9 +2476,9 @@ void BeamModuleAssembler::emit_try_end_move_deallocate(
         const ArgSource &Src,
         const ArgRegister &Dst,
         const ArgWord &Deallocate) {
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     a.sub(TMP, TMP, imm(1));
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     mov_arg(Dst, Src);
     if (Deallocate.get() > 0) {
         add(E, E, Deallocate.get() * sizeof(Eterm));
@@ -2491,11 +2491,11 @@ void BeamModuleAssembler::emit_try_case(const ArgYRegister &CatchTag) {
      * x1 = error reason/thrown value
      * x2 = raw stacktrace
      * x3 = class */
-    a.ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, catches)));
     a.ldr(ARG1, getXRef(3));
     a.str(ARG1, getXRef(0));
     a.sub(TMP, TMP, imm(1));
-    a.str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
+    safe_str(TMP, arm::Mem(c_p, offsetof(Process, catches)));
 
     /* The try_tag in the Y slot in the stack frame has already been
      * cleared. */
@@ -2505,8 +2505,8 @@ void BeamModuleAssembler::emit_try_case(const ArgYRegister &CatchTag) {
         Label ok = a.newLabel();
         Label bad = a.newLabel();
         comment("Start of assertion code");
-        a.ldr(ARG1, arm::Mem(c_p, offsetof(Process, fvalue)));
-        a.ldr(ARG2, arm::Mem(c_p, offsetof(Process, ftrace)));
+        safe_ldr(ARG1, arm::Mem(c_p, offsetof(Process, fvalue)));
+        safe_ldr(ARG2, arm::Mem(c_p, offsetof(Process, ftrace)));
         mov_imm(TMP, NIL);
 
         a.cmp(ARG1, TMP);
@@ -2527,8 +2527,8 @@ void BeamModuleAssembler::emit_try_case_end(const ArgSource &Src) {
 }
 
 void BeamGlobalAssembler::emit_raise_shared() {
-    a.str(ARG1, arm::Mem(c_p, offsetof(Process, fvalue)));
-    a.str(ARG2, arm::Mem(c_p, offsetof(Process, ftrace)));
+    safe_str(ARG1, arm::Mem(c_p, offsetof(Process, fvalue)));
+    safe_str(ARG2, arm::Mem(c_p, offsetof(Process, ftrace)));
 
     emit_enter_runtime();
     a.mov(ARG1, c_p);
@@ -2595,12 +2595,12 @@ void BeamModuleAssembler::emit_raw_raise() {
 
 /* ARG3 = current_label */
 void BeamGlobalAssembler::emit_i_test_yield_shared() {
-    a.sub(ARG2, ARG3, imm(sizeof(ErtsCodeMFA)));
-    a.add(ARG3, ARG3, imm(TEST_YIELD_RETURN_OFFSET));
+    sub(ARG2, ARG3, sizeof(ErtsCodeMFA));
+    add(ARG3, ARG3, TEST_YIELD_RETURN_OFFSET);
 
-    a.str(ARG2, arm::Mem(c_p, offsetof(Process, current)));
+    safe_str(ARG2, arm::Mem(c_p, offsetof(Process, current)));
     a.ldr(ARG2, arm::Mem(ARG2, offsetof(ErtsCodeMFA, arity)));
-    a.strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
+    safe_strb(ARG2, arm::Mem(c_p, offsetof(Process, arity)));
 
     a.b(labels[context_switch_simplified]);
 }
@@ -2619,7 +2619,7 @@ void BeamModuleAssembler::emit_i_test_yield() {
          * impact on performance but there's little point in doing this unless
          * the user has requested it -- it's an undocumented feature for
          * now. */
-        a.str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+        safe_str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
     }
 
     a.subs(FCALLS, FCALLS, imm(1));

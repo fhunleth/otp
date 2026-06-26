@@ -571,7 +571,10 @@ arm::Mem BeamModuleAssembler::embed_constant(const ArgVal &value,
     }
 
     auto it = _constants.emplace(value,
-                                 Constant{.latestOffset = maxOffset,
+                                 Constant{.latestOffset = std::max<ssize_t>(
+                                                   currOffset,
+                                                   maxOffset -
+                                                           STUB_CHECK_INTERVAL),
                                           .anchor = a.newLabel(),
                                           .value = value});
     const Constant &constant = it->second;
@@ -723,7 +726,7 @@ void BeamModuleAssembler::emit_veneer(const Veneer &veneer) {
 
         a.align(AlignMode::kCode, 4);
         a.bind(pointer);
-        a.embedLabel(veneer.target);
+        a.embedLabel(veneer.target, 4);
     }
 }
 
@@ -742,7 +745,7 @@ void BeamModuleAssembler::emit_constant(const Constant &constant) {
     } else if (value.isWord()) {
         a.embedUInt32(value.as<ArgWord>().get());
     } else if (value.isLabel()) {
-        a.embedLabel(rawLabels.at(value.as<ArgLabel>().get()));
+        a.embedLabel(rawLabels.at(value.as<ArgLabel>().get()), 4);
     } else {
         switch (value.getType()) {
         case ArgVal::BytePtr:

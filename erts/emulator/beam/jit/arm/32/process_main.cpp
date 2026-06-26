@@ -80,7 +80,7 @@ void BeamGlobalAssembler::emit_process_main() {
     const arm::Mem start_time = arm::Mem(ARG4, relative_start_t_offset);
     auto setup_start_time_base = [&]() {
         a.mov(ARG4, scheduler_registers);
-        a.add(ARG4, ARG4, imm(start_t_i_offset));
+        add(ARG4, ARG4, start_t_i_offset);
     };
     auto load_start_time = [&](const a32::Gp &dst) {
         setup_start_time_base();
@@ -125,7 +125,7 @@ void BeamGlobalAssembler::emit_process_main() {
     a.bind(do_schedule_local);
     {
         /* Figure out reds_used. def_arg_reg[5] = REDS_IN */
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
         a.sub(ARG3, TMP, FCALLS);
         a.b(schedule_next);
     }
@@ -155,8 +155,8 @@ void BeamGlobalAssembler::emit_process_main() {
         a.bind(check_i);
 #endif
 
-        a.str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, state.value)));
+        safe_str(ARG3, arm::Mem(c_p, offsetof(Process, i)));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, state.value)));
 
         a.tst(TMP, imm(ERTS_PSFLG_EXITING));
         a.b_eq(not_exiting);
@@ -164,17 +164,17 @@ void BeamGlobalAssembler::emit_process_main() {
             comment("Process exiting");
 
             a.adr(TMP, labels[process_exit]);
-            a.str(TMP, arm::Mem(c_p, offsetof(Process, i)));
+            safe_str(TMP, arm::Mem(c_p, offsetof(Process, i)));
             mov_imm(TMP, 0);
-            a.strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
-            a.str(TMP, arm::Mem(c_p, offsetof(Process, current)));
+            safe_strb(TMP, arm::Mem(c_p, offsetof(Process, arity)));
+            safe_str(TMP, arm::Mem(c_p, offsetof(Process, current)));
             a.b(do_schedule_local);
         }
 
         a.bind(not_exiting);
 
         /* Figure out reds_used. def_arg_reg[5] = REDS_IN */
-        a.ldr(TMP, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
+        safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
         a.sub(FCALLS, TMP, FCALLS);
 
         comment("Copy out X registers");
@@ -242,7 +242,7 @@ void BeamGlobalAssembler::emit_process_main() {
             /* Enable long schedule test */
             runtime_call<0>(erts_timestamp_millis);
             store_start_time(ARG1);
-            a.ldr(TMP, arm::Mem(c_p, offsetof(Process, i)));
+            safe_ldr(TMP, arm::Mem(c_p, offsetof(Process, i)));
             store_start_time_i(TMP);
         }
 
@@ -255,8 +255,8 @@ void BeamGlobalAssembler::emit_process_main() {
         runtime_call<2>(copy_in_registers);
 
         /* Setup reduction counting */
-        a.ldr(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
-        a.str(FCALLS, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
+        safe_ldr(FCALLS, arm::Mem(c_p, offsetof(Process, fcalls)));
+        safe_str(FCALLS, arm::Mem(c_p, offsetof(Process, def_arg_reg[5])));
 
 #ifdef DEBUG
         a.str(FCALLS, a32::Mem(c_p, offsetof(Process, debug_reds_in)));
@@ -284,7 +284,7 @@ void BeamGlobalAssembler::emit_process_main() {
          *
          * This relies on `op_call_nif_WWW` / `op_call_bif_W` being encoded as
          * UDF(opcode) followed by UDF(0), which we will never emit. */
-        a.ldr(ARG1, arm::Mem(c_p, offsetof(Process, i)));
+        safe_ldr(ARG1, arm::Mem(c_p, offsetof(Process, i)));
         a.ldr(TMP, arm::Mem(ARG1));
 
         ERTS_CT_ASSERT((op_call_nif_WWW & 0xFFFF0000) == 0);
