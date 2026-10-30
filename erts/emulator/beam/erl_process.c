@@ -138,6 +138,134 @@ Uint ERTS_WRITE_UNLIKELY(erts_no_dirty_cpu_schedulers) = 0;
 Uint ERTS_WRITE_UNLIKELY(erts_no_dirty_io_schedulers) = 0;
 int ERTS_WRITE_UNLIKELY(erts_no_aux_work_threads);
 
+#define ERTS_MAX_COMPARTMENTS 64
+
+int erts_compartments_enabled = 0;
+static struct {
+    int configured;
+    Uint scheduler;
+    Uint32 zones;
+} compartments[ERTS_MAX_COMPARTMENTS];
+static Uint *compartment_scheduler_owner;
+
+static Uint
+compartment_config_number(char **cursor, Uint limit)
+{
+    Uint value = 0;
+    char *p = *cursor;
+
+    if (*p < '0' || *p > '9')
+        erts_exit(1, "Invalid ERL_COMPARTMENTS number\n");
+    do {
+        Uint digit = *p++ - '0';
+        if (value > limit / 10 ||
+            (value == limit / 10 && digit > limit % 10))
+            erts_exit(1, "ERL_COMPARTMENTS number out of range\n");
+        value = value * 10 + digit;
+    } while (*p >= '0' && *p <= '9');
+    *cursor = p;
+    return value;
+}
+
+static void
+init_compartments(int no_schedulers, int no_schedulers_online)
+{
+    char config[4096], *p;
+    size_t size = sizeof(config);
+    int result, i, unreserved = 0;
+
+    result = erts_sys_explicit_8bit_getenv("ERL_COMPARTMENTS", config, &size);
+    if (result == 0)
+        return;
+    if (result != 1 || !config[0])
+        goto bad_config;
+    if (no_schedulers != no_schedulers_online)
+        erts_exit(1,
+                  "ERL_COMPARTMENTS requires all normal schedulers online\n");
+
+    compartment_scheduler_owner =
+        erts_alloc_permanent_cache_aligned(ERTS_ALC_T_RUNQS,
+                                           no_schedulers * sizeof(Uint));
+    sys_memzero(compartment_scheduler_owner, no_schedulers * sizeof(Uint));
+    compartments[0].configured = 1;
+    compartments[0].zones = ~((Uint32) 0);
+
+    p = config;
+    for (;;) {
+        Uint id = compartment_config_number(&p, ERTS_MAX_COMPARTMENTS - 1);
+        Uint scheduler, zones;
+        if (!id || compartments[id].configured || *p++ != ':')
+            goto bad_config;
+        scheduler = compartment_config_number(&p, no_schedulers);
+        if (*p++ != ':')
+            goto bad_config;
+        zones = compartment_config_number(&p, (Uint32) ~((Uint32) 0));
+        if (!zones)
+            goto bad_config;
+        if (scheduler) {
+            if (compartment_scheduler_owner[scheduler - 1])
+                goto bad_config;
+            compartment_scheduler_owner[scheduler - 1] = id;
+        }
+        compartments[id].configured = 1;
+        compartments[id].scheduler = scheduler;
+        compartments[id].zones = (Uint32) zones;
+        if (!*p)
+            break;
+        if (*p++ != ',')
+            goto bad_config;
+    }
+    for (i = 0; i < no_schedulers; i++)
+        unreserved += !compartment_scheduler_owner[i];
+    if (!unreserved)
+        goto bad_config;
+
+    erts_compartments_enabled = 1;
+    /* Reserved schedulers must not be deactivated by load compaction. */
+    erts_sched_compact_load = 0;
+    return;
+
+bad_config:
+    erts_exit(1,
+              "Invalid ERL_COMPARTMENTS; expected id:scheduler:zones,... "
+              "with an unreserved scheduler\n");
+}
+
+int
+erts_compartment_runq_allowed(Process *p, ErtsRunQueue *rq)
+{
+    Uint scheduler = compartments[p->compartment].scheduler;
+    if (!rq)
+        return !scheduler;
+    if (scheduler)
+        return rq->ix == scheduler - 1;
+    return !compartment_scheduler_owner[rq->ix];
+}
+
+int
+erts_compartment_message_allowed(Process *sender, Process *receiver)
+{
+    return !erts_compartments_enabled || !sender ||
+        (compartments[sender->compartment].zones &
+         compartments[receiver->compartment].zones);
+}
+
+Eterm
+erts_compartment_info(Process *p)
+{
+    Eterm *hp;
+    Eterm zones;
+    Uint hsz = 4;
+    if (!erts_compartments_enabled)
+        return am_undefined;
+    erts_bld_uint(NULL, &hsz, compartments[p->compartment].zones);
+    hp = HAlloc(p, hsz);
+    zones = erts_bld_uint(&hp, NULL, compartments[p->compartment].zones);
+    return TUPLE3(hp, make_small(p->compartment),
+                  make_small(compartments[p->compartment].scheduler),
+                  zones);
+}
+
 static char *erts_aux_work_flag_descr[ERTS_SSI_AUX_WORK_NO_FLAGS] = {0};
 int erts_aux_work_no_flags = ERTS_SSI_AUX_WORK_NO_FLAGS;
 
@@ -6098,6 +6226,8 @@ erts_init_scheduling(int no_schedulers, int no_schedulers_online, int no_poll_th
     size_t size_runqs;
     erts_aint32_t set_schdlr_sspnd_change_flags;
 
+    init_compartments(no_schedulers, no_schedulers_online);
+
     init_misc_op_list_alloc();
     init_proc_sys_task_queues_alloc();
 
@@ -6475,6 +6605,7 @@ make_proxy_proc(Process *prev_proxy, Process *proc, erts_aint32_t prio)
     }
 
     proxy->common.id = proc->common.id;
+    proxy->compartment = proc->compartment;
     ASSERT(proxy->u.real_proc == NULL);
     proxy->u.real_proc = proc;
     erts_proc_inc_refc(proc);
@@ -12154,6 +12285,7 @@ typedef struct {
     erts_aint32_t state;
     ErtsRunQueue *run_queue;
     int bound;
+    Uint compartment;
 } ErtsEarlyProcInit;
 
 static void early_init_process_struct(void *varg, Eterm data)
@@ -12162,6 +12294,7 @@ static void early_init_process_struct(void *varg, Eterm data)
     Process *proc = arg->proc;
 
     proc->common.id = make_internal_pid(data);
+    proc->compartment = arg->compartment;
     erts_atomic32_init_nob(&proc->xstate, 0);
     proc->dirty_sys_tasks = NULL;
     erts_init_runq_proc(proc, arg->run_queue, arg->bound);
@@ -12177,7 +12310,7 @@ static void early_init_process_struct(void *varg, Eterm data)
 ** Allocate process and find out where to place next process.
 */
 static Process*
-alloc_process(ErtsRunQueue *rq, int bound, erts_aint32_t state)
+alloc_process(ErtsRunQueue *rq, int bound, erts_aint32_t state, Uint compartment)
 {
     ErtsEarlyProcInit init_arg;
     Process *p;
@@ -12192,6 +12325,7 @@ alloc_process(ErtsRunQueue *rq, int bound, erts_aint32_t state)
     init_arg.state = state;
     init_arg.run_queue = rq;
     init_arg.bound = bound;
+    init_arg.compartment = compartment;
 
     ERTS_CT_ASSERT(offsetof(Process,common) == 0);
 
@@ -12367,6 +12501,16 @@ erts_parse_spawn_opts(ErlSpawnOpts *sop, Eterm opts_list, Eterm *tag,
                     result = -1;
                 else
                     sop->scheduler = (int) scheduler;
+            } else if (arg == am_compartment && is_small(val)) {
+                Sint id = signed_val(val);
+                if (sop->flags & SPO_COMPARTMENT)
+                    sop->multi_set = !0;
+                sop->flags |= SPO_COMPARTMENT;
+                if (!erts_compartments_enabled || id < 0 ||
+                    id >= ERTS_MAX_COMPARTMENTS || !compartments[id].configured)
+                    result = -1;
+                else
+                    sop->compartment = (Uint) id;
             } else if (arg == am_reply) {
                 if (!message_opt)
                     result = -1;
@@ -12441,6 +12585,7 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
 		   ErlSpawnOpts* so) /* Options for spawn. */
 {
     int bound = 0;
+    Uint compartment = parent ? parent->compartment : 0;
     Uint flags = 0, qs_flags = 0;
     ErtsRunQueue *rq = NULL;
     Process *p;
@@ -12497,6 +12642,14 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
 	goto error;
     }
 
+    if (so->flags & SPO_COMPARTMENT) {
+        if (!erts_compartments_enabled || !parent || parent->compartment != 0) {
+            so->error_code = BADARG;
+            goto error;
+        }
+        compartment = so->compartment;
+    }
+
     if (so->flags & SPO_USE_ARGS) {
 	if (so->scheduler) {
 	    int ix = so->scheduler-1;
@@ -12532,7 +12685,29 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
     }
     ASSERT(rq);
 
-    p = alloc_process(rq, bound, state); /* All proc locks are locked by this thread
+    if (erts_compartments_enabled) {
+        Uint scheduler = compartments[compartment].scheduler;
+        if (so->flags & SPO_SCHEDULER) {
+            if (so->scheduler &&
+                ((scheduler && scheduler != so->scheduler) ||
+                 (!scheduler && compartment_scheduler_owner[so->scheduler - 1]))) {
+                so->error_code = BADARG;
+                goto error;
+            }
+        }
+        if (scheduler) {
+            rq = ERTS_RUNQ_IX(scheduler - 1);
+            bound = 1;
+        }
+        else if (compartment_scheduler_owner[rq->ix]) {
+            int ix;
+            for (ix = 0; compartment_scheduler_owner[ix]; ix++)
+                ;
+            rq = ERTS_RUNQ_IX(ix);
+        }
+    }
+
+    p = alloc_process(rq, bound, state, compartment); /* All proc locks are locked by this thread
                                             on success */
     if (!p) {
 	erts_send_error_to_logger_str(group_leader, "Too many processes\n");
@@ -13311,6 +13486,7 @@ void erts_init_empty_process(Process *p)
     erts_atomic32_init_nob(&p->state, (erts_aint32_t) PRIORITY_NORMAL);
 
     p->scheduler_data = NULL;
+    p->compartment = 0;
     erts_proc_lock_init(p);
     erts_proc_unlock(p, ERTS_PROC_LOCKS_ALL);
     erts_init_runq_proc(p, ERTS_RUNQ_IX(0), 0);

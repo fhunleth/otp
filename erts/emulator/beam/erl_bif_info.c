@@ -2784,6 +2784,8 @@ BIF_RETTYPE system_info_1(BIF_ALIST_1)
     } else if (BIF_ARG_1 == am_scheduler_id) {
 	ErtsSchedulerData *esdp = erts_proc_sched_data(BIF_P);
 	BIF_RET(make_small(esdp->no));
+    } else if (BIF_ARG_1 == am_compartment) {
+        BIF_RET(erts_compartment_info(BIF_P));
     } else if (BIF_ARG_1 == am_compat_rel) {
 	ASSERT(erts_compat_rel > 0);
 	BIF_RET(make_small(erts_compat_rel));

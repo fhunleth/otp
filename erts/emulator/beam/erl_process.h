@@ -1068,6 +1068,7 @@ struct process {
     /* End of frequently used fields by BEAMASM code. */
 
     Uint32 rcount;              /* Suspend count */
+    Uint32 compartment;         /* Immutable experimental compartment ID */
     byte schedule_count;        /* Times left to reschedule a low prio process */
 
     /* Saved x registers. */
@@ -1491,8 +1492,9 @@ void erts_check_for_holes(Process* p);
 #define SPO_IX_NO_SMSG          12
 #define SPO_IX_NO_EMSG          13
 #define SPO_IX_ASYNC_DIST       14
+#define SPO_IX_COMPARTMENT      15
 
-#define SPO_NO_INDICES          (SPO_IX_ASYNC_DIST+1)
+#define SPO_NO_INDICES          (SPO_IX_COMPARTMENT+1)
 
 #define SPO_LINK                (1 << SPO_IX_LINK)
 #define SPO_MONITOR             (1 << SPO_IX_MONITOR)
@@ -1509,8 +1511,9 @@ void erts_check_for_holes(Process* p);
 #define SPO_NO_SMSG             (1 << SPO_IX_NO_SMSG)
 #define SPO_NO_EMSG             (1 << SPO_IX_NO_EMSG)
 #define SPO_ASYNC_DIST          (1 << SPO_IX_ASYNC_DIST)
+#define SPO_COMPARTMENT         (1 << SPO_IX_COMPARTMENT)
 
-#define SPO_MAX_FLAG            SPO_ASYNC_DIST
+#define SPO_MAX_FLAG            SPO_COMPARTMENT
 
 #define SPO_USE_ARGS                 \
     (SPO_MIN_HEAP_SIZE               \
@@ -1560,6 +1563,7 @@ typedef struct {
     Uint max_heap_size;         /* Maximum heap size in words */
     Uint max_heap_flags;        /* Maximum heap flags (kill | log) */
     int scheduler;
+    Uint compartment;
 
 } ErlSpawnOpts;
 
@@ -2132,6 +2136,10 @@ Eterm erts_get_schedulers_binds(Process *c_p);
 Eterm erts_set_cpu_topology(Process *c_p, Eterm term);
 Eterm erts_bind_schedulers(Process *c_p, Eterm how);
 ErtsRunQueue *erts_schedid2runq(Uint);
+extern int erts_compartments_enabled;
+int erts_compartment_runq_allowed(Process *, ErtsRunQueue *);
+int erts_compartment_message_allowed(Process *, Process *);
+Eterm erts_compartment_info(Process *);
 Process *erts_schedule(ErtsSchedulerData *, Process*, int);
 void erts_schedule_misc_op(void (*)(void *), void *);
 int erts_parse_spawn_opts(ErlSpawnOpts *sop, Eterm opts_list, Eterm *tag,
@@ -2713,6 +2721,9 @@ erts_try_change_runq_proc(Process *p, ErtsRunQueue *rq)
     erts_aint_t old_rqint, new_rqint;
 
     ASSERT(rq);
+
+    if (erts_compartments_enabled && !erts_compartment_runq_allowed(p, rq))
+        return 0;
 
     new_rqint = (erts_aint_t) rq;
     old_rqint = (erts_aint_t) erts_atomic_read_nob(&p->run_queue);

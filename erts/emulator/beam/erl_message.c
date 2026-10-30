@@ -734,6 +734,9 @@ erts_send_message(Process* sender,
     }
 #endif
 
+    if (!erts_compartment_message_allowed(sender, receiver))
+        return;
+
     receiver_state = erts_atomic32_read_nob(&receiver->state);
 
     if (SEQ_TRACE_TOKEN(sender) != NIL) {

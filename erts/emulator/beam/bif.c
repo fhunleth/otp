@@ -2075,6 +2075,12 @@ BIF_RETTYPE process_flag_2(BIF_ALIST_2)
        if (sched < 0 || erts_no_schedulers < sched)
 	   goto error;
 
+       if (erts_compartments_enabled) {
+           ErtsRunQueue *rq = sched ? erts_schedid2runq(sched) : NULL;
+           if (!erts_compartment_runq_allowed(BIF_P, rq))
+               goto error;
+       }
+
        if (sched == 0) {
            old = erts_bind_runq_proc(BIF_P, 0);
 	   new = NULL;
@@ -4974,6 +4980,8 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
     Sint n;
 
     if (BIF_ARG_1 == am_multi_scheduling) {
+        if (erts_compartments_enabled)
+            goto error;
 	if (BIF_ARG_2 == am_block || BIF_ARG_2 == am_unblock
 	    || BIF_ARG_2 == am_block_normal || BIF_ARG_2 == am_unblock_normal) {
 	    int block = (BIF_ARG_2 == am_block
@@ -5016,6 +5024,9 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	Sint old_no;
 	if (!is_small(BIF_ARG_2))
 	    goto error;
+        if (erts_compartments_enabled &&
+            signed_val(BIF_ARG_2) != erts_no_schedulers)
+            goto error;
 	switch (erts_set_schedulers_online(BIF_P,
 					   ERTS_PROC_LOCK_MAIN,
 					   signed_val(BIF_ARG_2),
