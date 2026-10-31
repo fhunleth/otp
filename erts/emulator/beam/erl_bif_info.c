@@ -2496,7 +2496,13 @@ info_1_tuple(Process* BIF_P,	/* Pointer to current process. */
 
     sel = *tp++;
 
-    if (sel == am_memory_internal) {
+    if (sel == am_compartment_service && arity == 2 && is_small(tp[0])) {
+        ret = erts_compartment_service_info(BIF_P, unsigned_val(tp[0]));
+        if (is_non_value(ret))
+            goto badarg;
+        return ret;
+    }
+    else if (sel == am_memory_internal) {
 	switch (arity) {
 	case 3:
 	    if (erts_request_alloc_info(BIF_P, tp[0], tp[1], 1, 1))

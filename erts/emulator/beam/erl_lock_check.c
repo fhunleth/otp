@@ -204,6 +204,7 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     LEVEL,
     /* spin locks */
     {"state_prealloc",                          NULL},
+    {"compartment_service",                     NULL},
     {"sched_stat",				NULL}
 };
 

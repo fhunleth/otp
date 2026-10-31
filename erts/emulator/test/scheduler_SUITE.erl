@@ -51,6 +51,8 @@
 	 bound_process/1,
          compartments/1,
          compartments_test/0,
+         compartments_compaction_test/1,
+         compartments_priority_test/0,
 	
 	 scheduler_bind_types/1,
 	 cpu_topology/1,
@@ -294,11 +296,37 @@ compartments(Config) when is_list(Config) ->
     {ok, Peer, _Node} =
         ?CT_PEER(#{connection => standard_io,
                    args => ["+S", "4:4"],
-                   env => [{"ERL_COMPARTMENTS", "1:0:1,2:4:2,3:0:3"}]}),
+                   env => [{"ERL_COMPARTMENTS", "1:0:1,2:1000000:2,3:0:3"},
+                           {"ERL_COMPARTMENT_CAPACITY", "2000000"}]}),
     try
         ok = peer:call(Peer, ?MODULE, compartments_test, [], 60000)
     after
         peer:stop(Peer)
+    end,
+    lists:foreach(
+      fun({Budget, Floor}) ->
+              {ok, FloorPeer, _} =
+                  ?CT_PEER(#{connection => standard_io,
+                             args => ["+S", "4:4", "+scl", "true"],
+                             env => [{"ERL_COMPARTMENTS",
+                                      "1:" ++ integer_to_list(Budget) ++ ":1"},
+                                     {"ERL_COMPARTMENT_CAPACITY", "1000000"}]}),
+              try
+                  ok = peer:call(FloorPeer, ?MODULE, compartments_compaction_test,
+                                 [Floor], 30000)
+              after
+                  peer:stop(FloorPeer)
+              end
+      end, [{0, 1}, {600000, 2}, {1100000, 3}, {3000000, 4}]),
+    {ok, PriorityPeer, _} =
+        ?CT_PEER(#{connection => standard_io,
+                   args => ["+S", "1:1"],
+                   env => [{"ERL_COMPARTMENTS", "1:0:1,2:800000:2,3:400000:3"},
+                           {"ERL_COMPARTMENT_CAPACITY", "2000000"}]}),
+    try
+        ok = peer:call(PriorityPeer, ?MODULE, compartments_priority_test, [], 30000)
+    after
+        peer:stop(PriorityPeer)
     end.
 
 compartments_test() ->
@@ -320,23 +348,25 @@ compartments_test() ->
              after 5000 -> ct:fail({worker_start_timeout, Pid}) end
              || {Pid, _} <- Workers],
         {1, 0, 1} = compartment_call(Best, fun() -> erlang:system_info(compartment) end),
-        {2, 4, 2} = compartment_call(Critical, fun() -> erlang:system_info(compartment) end),
+        {2, 1000000, 2} =
+            compartment_call(Critical, fun() -> erlang:system_info(compartment) end),
         {3, 0, 3} = compartment_call(Gate, fun() -> erlang:system_info(compartment) end),
         lists:foreach(
           fun({Pid, Allowed}) ->
                   ok = compartment_call(
                          Pid, fun() -> compartment_children(Allowed) end)
-          end, [{Best, [1, 2, 3]}, {Critical, [4]}, {Gate, [1, 2, 3]}]),
+          end, [{Best, [1, 2, 3, 4]}, {Critical, [1, 2, 3, 4]},
+                {Gate, [1, 2, 3, 4]}]),
         ok = compartment_call(
                Critical,
                fun() ->
-                       compartment_badarg(fun() -> process_flag(scheduler, 0) end),
+                       0 = process_flag(scheduler, 0),
                        compartment_badarg(fun() -> process_flag(scheduler, 1) end),
                        compartment_badarg(
                          fun() -> spawn_opt(fun() -> ok end, [{scheduler, 1}]) end),
                        compartment_badarg(
                          fun() -> spawn_opt(fun() -> ok end, [{compartment, 0}]) end),
-                       4 = process_flag(scheduler, 4),
+                       compartment_badarg(fun() -> process_flag(scheduler, 4) end),
                        ok
                end),
         ok = compartment_call(
@@ -347,8 +377,8 @@ compartments_test() ->
                          fun() -> spawn_opt(fun() -> ok end, [{scheduler, 4}]) end),
                        compartment_badarg(
                          fun() -> spawn_opt(fun() -> ok end, [{compartment, 3}]) end),
-                       process_flag(scheduler, 1),
-                       1 = process_flag(scheduler, 0),
+                       compartment_badarg(fun() -> process_flag(scheduler, 1) end),
+                       0 = process_flag(scheduler, 0),
                        ok
                end),
         compartment_badarg(fun() -> erlang:system_flag(schedulers_online, 3) end),
@@ -365,18 +395,123 @@ compartments_test() ->
         ok = compartment_call(Best,
                               fun() -> Gate ! {forward, Critical, bridged}, ok end),
         receive {delivered, Critical, bridged} -> ok after 5000 -> ct:fail(no_bridge) end,
-        %% Keep the critical process idle while best-effort children try to migrate.
-        ok = compartment_call(Best, fun() -> compartment_children([1, 2, 3]) end),
+        ok = compartment_call(Best, fun() -> compartment_children([1, 2, 3, 4]) end),
         receive
             {delivered, _, blocked} -> ct:fail(cross_zone_delivery);
             {unexpected, _, Msg} -> ct:fail({unexpected_message, Msg})
         after 100 ->
             ok
-        end
+        end,
+        compartment_badarg(fun() -> erlang:system_info({compartment_service, -1}) end),
+        compartment_badarg(fun() -> erlang:system_info({compartment_service, 64}) end),
+        compartment_service_test()
     after
         lists:foreach(fun({Pid, _}) -> exit(Pid, kill) end, Workers),
         lists:foreach(fun({_, Ref}) -> receive {'DOWN', Ref, process, _, _} -> ok end end,
                       Workers)
+    end.
+
+compartment_service_test() ->
+    timer:sleep(0),
+    OldPriority = process_flag(priority, max),
+    Critical = [spawn_opt(fun compartment_burn/0, [{compartment, 2}, monitor])
+                || _ <- lists:seq(1, 8)],
+    Best = [spawn_opt(fun compartment_burn/0,
+                      [{compartment, 1}, {priority, max}, monitor])
+            || _ <- lists:seq(1, 32)],
+    try
+        {Budget, Before, _, _, 100, _, Floor, _} =
+            erlang:system_info({compartment_service, 2}),
+        Start = erlang:monotonic_time(microsecond),
+        timer:sleep(1000),
+        {Budget, After, _, Inflight, 100, _, Floor, Active} =
+            erlang:system_info({compartment_service, 2}),
+        Elapsed = erlang:monotonic_time(microsecond) - Start,
+        true = Active >= Floor,
+        true = Inflight =< 4 * 4000,
+        %% Allow scheduling/measurement granularity, not priority starvation.
+        true = After - Before >= Budget * Elapsed div 100000 * 8 div 10,
+        compartment_stop_workers(Best),
+        {_, BorrowBefore, _, _, _, _, _, _} =
+            erlang:system_info({compartment_service, 2}),
+        timer:sleep(500),
+        {_, BorrowAfter, _, _, _, _, _, _} =
+            erlang:system_info({compartment_service, 2}),
+        true = BorrowAfter - BorrowBefore > Budget * 10
+    after
+        compartment_stop_workers(Critical ++ Best),
+        process_flag(priority, OldPriority)
+    end,
+    timer:sleep(250),
+    {IdleBudget, _, Credit, 0, _, _, _, _} =
+        erlang:system_info({compartment_service, 2}),
+    IdleBudget = Credit,
+    ok.
+
+compartments_priority_test() ->
+    timer:sleep(0),
+    OldPriority = process_flag(priority, max),
+    Parent = self(),
+    Worker = fun() ->
+                     Parent ! {ready, self()},
+                     receive go -> compartment_burn() end
+             end,
+    Workers = [spawn_opt(Worker, [{compartment, Id}, {priority, Priority}, monitor])
+               || {Id, Priority} <- [{2, high}, {2, low}, {3, normal}, {1, max}]],
+    try
+        lists:foreach(fun({Pid, _}) -> receive {ready, Pid} -> ok end end, Workers),
+        [{_, _}, {Low, _}, {_, _}, {_, _}] = Workers,
+        {reductions, LowBefore} = process_info(Low, reductions),
+        {_, Before2, _, _, _, _, _, _} = erlang:system_info({compartment_service, 2}),
+        {_, Before3, _, _, _, _, _, _} = erlang:system_info({compartment_service, 3}),
+        Start = erlang:monotonic_time(microsecond),
+        lists:foreach(fun({Pid, _}) -> Pid ! go end, Workers),
+        timer:sleep(1000),
+        {Budget2, After2, _, _, _, _, _, _} =
+            erlang:system_info({compartment_service, 2}),
+        {Budget3, After3, _, _, _, _, _, _} =
+            erlang:system_info({compartment_service, 3}),
+        Elapsed = erlang:monotonic_time(microsecond) - Start,
+        true = After2 - Before2 >= Budget2 * Elapsed div 100000 * 8 div 10,
+        true = After3 - Before3 >= Budget3 * Elapsed div 100000 * 8 div 10,
+        %% Cross-compartment service must not flatten priorities within one.
+        {reductions, LowAfter} = process_info(Low, reductions),
+        true = LowAfter - LowBefore < 4000,
+        ok
+    after
+        compartment_stop_workers(Workers),
+        process_flag(priority, OldPriority)
+    end.
+
+compartment_stop_workers(Workers) ->
+    lists:foreach(fun({Pid, _}) -> exit(Pid, kill) end, Workers),
+    lists:foreach(fun({Pid, Ref}) ->
+                          receive {'DOWN', Ref, process, Pid, _} -> ok
+                          after 0 -> erlang:demonitor(Ref, [flush]), ok
+                          end
+                  end, Workers).
+
+compartment_burn() ->
+    compartment_burn().
+
+compartments_compaction_test(Floor) ->
+    Worker = spawn_monitor(fun compartment_burn/0),
+    try
+        compartment_wait_for_floor(Floor, erlang:monotonic_time(millisecond) + 10000)
+    after
+        compartment_stop_workers([Worker])
+    end.
+
+compartment_wait_for_floor(Floor, Deadline) ->
+    {_, _, _, _, 100, 1000000, Floor, Active} =
+        erlang:system_info({compartment_service, 1}),
+    true = Active >= Floor,
+    case Active of
+        Floor -> ok;
+        _ ->
+            true = erlang:monotonic_time(millisecond) < Deadline,
+            timer:sleep(20),
+            compartment_wait_for_floor(Floor, Deadline)
     end.
 
 compartment_worker(Observer) ->

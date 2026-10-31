@@ -705,6 +705,8 @@ struct ErtsSchedulerData_ {
     Port *current_port;
     ErtsRunQueue *run_queue;
     int virtual_reds;
+    Uint compartment_claim;
+    Uint compartment_claim_id;
     int cpu_id;			/* >= 0 when bound */
     ErtsAuxWorkData aux_work_data;
     ErtsAtomCacheMap atom_cache_map;
@@ -2137,9 +2139,9 @@ Eterm erts_set_cpu_topology(Process *c_p, Eterm term);
 Eterm erts_bind_schedulers(Process *c_p, Eterm how);
 ErtsRunQueue *erts_schedid2runq(Uint);
 extern int erts_compartments_enabled;
-int erts_compartment_runq_allowed(Process *, ErtsRunQueue *);
 int erts_compartment_message_allowed(Process *, Process *);
 Eterm erts_compartment_info(Process *);
+Eterm erts_compartment_service_info(Process *, Uint);
 Process *erts_schedule(ErtsSchedulerData *, Process*, int);
 void erts_schedule_misc_op(void (*)(void *), void *);
 int erts_parse_spawn_opts(ErlSpawnOpts *sop, Eterm opts_list, Eterm *tag,
@@ -2721,9 +2723,6 @@ erts_try_change_runq_proc(Process *p, ErtsRunQueue *rq)
     erts_aint_t old_rqint, new_rqint;
 
     ASSERT(rq);
-
-    if (erts_compartments_enabled && !erts_compartment_runq_allowed(p, rq))
-        return 0;
 
     new_rqint = (erts_aint_t) rq;
     old_rqint = (erts_aint_t) erts_atomic_read_nob(&p->run_queue);

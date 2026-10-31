@@ -2075,11 +2075,8 @@ BIF_RETTYPE process_flag_2(BIF_ALIST_2)
        if (sched < 0 || erts_no_schedulers < sched)
 	   goto error;
 
-       if (erts_compartments_enabled) {
-           ErtsRunQueue *rq = sched ? erts_schedid2runq(sched) : NULL;
-           if (!erts_compartment_runq_allowed(BIF_P, rq))
-               goto error;
-       }
+       if (erts_compartments_enabled && sched)
+           goto error;
 
        if (sched == 0) {
            old = erts_bind_runq_proc(BIF_P, 0);
