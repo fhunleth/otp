@@ -145,7 +145,6 @@ int erts_compartments_enabled = 0;
 static struct {
     int configured;
     Uint budget;
-    Uint32 zones;
     Sint64 credit;
     Uint inflight;
     Uint64 reductions;
@@ -213,26 +212,19 @@ init_compartments(int no_schedulers, int no_schedulers_online)
                       ERTS_LOCK_FLAGS_PROPERTY_STATIC |
                       ERTS_LOCK_FLAGS_CATEGORY_SCHEDULER);
     compartments[0].configured = 1;
-    compartments[0].zones = ~((Uint32) 0);
 
     p = config;
     for (;;) {
         Uint id = compartment_config_number(&p, ERTS_MAX_COMPARTMENTS - 1);
-        Uint budget, zones;
+        Uint budget;
         if (!id || compartments[id].configured || *p++ != ':')
             goto bad_config;
         budget = compartment_config_number(&p, (Uint32) ~((Uint32) 0));
         if (budget && budget < CONTEXT_REDS)
             goto bad_config;
-        if (*p++ != ':')
-            goto bad_config;
-        zones = compartment_config_number(&p, (Uint32) ~((Uint32) 0));
-        if (!zones)
-            goto bad_config;
         compartments[id].configured = 1;
         compartments[id].budget = budget;
         compartments[id].credit = (Sint64) budget * ERTS_COMPARTMENT_PERIOD_US;
-        compartments[id].zones = (Uint32) zones;
         total += budget;
         if (!*p)
             break;
@@ -250,7 +242,7 @@ init_compartments(int no_schedulers, int no_schedulers_online)
 
 bad_config:
     erts_exit(1,
-              "Invalid ERL_COMPARTMENTS; expected id:reductions_per_100ms:zones,... "
+              "Invalid ERL_COMPARTMENTS; expected id:reductions_per_100ms,... "
               "(nonzero budgets and capacity must be at least CONTEXT_REDS)\n");
 }
 
@@ -312,29 +304,18 @@ compartment_queue_change(ErtsRunQueue *rq, Process *p, int change)
                               change);
 }
 
-int
-erts_compartment_message_allowed(Process *sender, Process *receiver)
-{
-    return !erts_compartments_enabled || !sender ||
-        (compartments[sender->compartment].zones &
-         compartments[receiver->compartment].zones);
-}
-
 Eterm
 erts_compartment_info(Process *p)
 {
     Eterm *hp;
-    Eterm zones, budget;
-    Uint hsz = 4;
+    Eterm budget;
+    Uint hsz = 3;
     if (!erts_compartments_enabled)
         return am_undefined;
-    erts_bld_uint(NULL, &hsz, compartments[p->compartment].zones);
     erts_bld_uint(NULL, &hsz, compartments[p->compartment].budget);
     hp = HAlloc(p, hsz);
-    zones = erts_bld_uint(&hp, NULL, compartments[p->compartment].zones);
     budget = erts_bld_uint(&hp, NULL, compartments[p->compartment].budget);
-    return TUPLE3(hp, make_small(p->compartment),
-                  budget, zones);
+    return TUPLE2(hp, make_small(p->compartment), budget);
 }
 
 Eterm

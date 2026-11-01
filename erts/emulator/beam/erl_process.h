@@ -2139,7 +2139,6 @@ Eterm erts_set_cpu_topology(Process *c_p, Eterm term);
 Eterm erts_bind_schedulers(Process *c_p, Eterm how);
 ErtsRunQueue *erts_schedid2runq(Uint);
 extern int erts_compartments_enabled;
-int erts_compartment_message_allowed(Process *, Process *);
 Eterm erts_compartment_info(Process *);
 Eterm erts_compartment_service_info(Process *, Uint);
 Process *erts_schedule(ErtsSchedulerData *, Process*, int);

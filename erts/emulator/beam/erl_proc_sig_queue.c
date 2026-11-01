@@ -2124,9 +2124,6 @@ erts_proc_sig_send_altact_msg(Process *c_p, Eterm from, Eterm to, Eterm msg, Ete
     if (!rp)
         return;
 
-    if (!erts_compartment_message_allowed(c_p, rp))
-        return;
-
     rp_locks = c_p == rp ? ERTS_PROC_LOCK_MAIN : 0;
 
     if (c_p && have_seqtrace(token)) {

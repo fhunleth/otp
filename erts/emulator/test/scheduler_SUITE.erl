@@ -296,7 +296,7 @@ compartments(Config) when is_list(Config) ->
     {ok, Peer, _Node} =
         ?CT_PEER(#{connection => standard_io,
                    args => ["+S", "4:4"],
-                   env => [{"ERL_COMPARTMENTS", "1:0:1,2:1000000:2,3:0:3"},
+                   env => [{"ERL_COMPARTMENTS", "1:0,2:1000000"},
                            {"ERL_COMPARTMENT_CAPACITY", "2000000"}]}),
     try
         ok = peer:call(Peer, ?MODULE, compartments_test, [], 60000)
@@ -309,7 +309,7 @@ compartments(Config) when is_list(Config) ->
                   ?CT_PEER(#{connection => standard_io,
                              args => ["+S", "4:4", "+scl", "true"],
                              env => [{"ERL_COMPARTMENTS",
-                                      "1:" ++ integer_to_list(Budget) ++ ":1"},
+                                      "1:" ++ integer_to_list(Budget)},
                                      {"ERL_COMPARTMENT_CAPACITY", "1000000"}]}),
               try
                   ok = peer:call(FloorPeer, ?MODULE, compartments_compaction_test,
@@ -321,7 +321,7 @@ compartments(Config) when is_list(Config) ->
     {ok, PriorityPeer, _} =
         ?CT_PEER(#{connection => standard_io,
                    args => ["+S", "1:1"],
-                   env => [{"ERL_COMPARTMENTS", "1:0:1,2:800000:2,3:400000:3"},
+                   env => [{"ERL_COMPARTMENTS", "1:0,2:800000,3:400000"},
                            {"ERL_COMPARTMENT_CAPACITY", "2000000"}]}),
     try
         ok = peer:call(PriorityPeer, ?MODULE, compartments_priority_test, [], 30000)
@@ -330,33 +330,27 @@ compartments(Config) when is_list(Config) ->
     end.
 
 compartments_test() ->
-    {0, 0, 16#ffffffff} = erlang:system_info(compartment),
+    {0, 0} = erlang:system_info(compartment),
     Observer = self(),
     Workers =
         [spawn_opt(fun() ->
-                           register(Name, self()),
-                           Alias = alias([priority]),
-                           Observer ! {ready, self(), Alias},
-                           compartment_worker(Observer)
+                           Observer ! {ready, self()},
+                           compartment_worker()
                    end, [{compartment, Id}, monitor])
-         || {Id, Name} <- [{1, compartment_best_effort},
-                           {2, compartment_critical},
-                           {3, compartment_gatekeeper}]],
+         || Id <- [1, 2]],
     try
-        [{Best, BestAlias}, {Critical, CriticalAlias}, {Gate, _}] =
-            [receive {ready, Pid, Alias} -> {Pid, Alias}
+        [Best, Critical] =
+            [receive {ready, Pid} -> Pid
              after 5000 -> ct:fail({worker_start_timeout, Pid}) end
              || {Pid, _} <- Workers],
-        {1, 0, 1} = compartment_call(Best, fun() -> erlang:system_info(compartment) end),
-        {2, 1000000, 2} =
+        {1, 0} = compartment_call(Best, fun() -> erlang:system_info(compartment) end),
+        {2, 1000000} =
             compartment_call(Critical, fun() -> erlang:system_info(compartment) end),
-        {3, 0, 3} = compartment_call(Gate, fun() -> erlang:system_info(compartment) end),
         lists:foreach(
           fun({Pid, Allowed}) ->
                   ok = compartment_call(
                          Pid, fun() -> compartment_children(Allowed) end)
-          end, [{Best, [1, 2, 3, 4]}, {Critical, [1, 2, 3, 4]},
-                {Gate, [1, 2, 3, 4]}]),
+          end, [{Best, [1, 2, 3, 4]}, {Critical, [1, 2, 3, 4]}]),
         ok = compartment_call(
                Critical,
                fun() ->
@@ -376,32 +370,13 @@ compartments_test() ->
                        compartment_badarg(
                          fun() -> spawn_opt(fun() -> ok end, [{scheduler, 4}]) end),
                        compartment_badarg(
-                         fun() -> spawn_opt(fun() -> ok end, [{compartment, 3}]) end),
+                         fun() -> spawn_opt(fun() -> ok end, [{compartment, 2}]) end),
                        compartment_badarg(fun() -> process_flag(scheduler, 1) end),
                        0 = process_flag(scheduler, 0),
                        ok
                end),
         compartment_badarg(fun() -> erlang:system_flag(schedulers_online, 3) end),
         compartment_badarg(fun() -> erlang:system_flag(multi_scheduling, block) end),
-        ToCritical = [Critical, compartment_critical,
-                      {compartment_critical, node()}, CriticalAlias],
-        ToBest = [Best, compartment_best_effort,
-                  {compartment_best_effort, node()}, BestAlias],
-        ok = compartment_call(Best, fun() -> compartment_sends(ToCritical, blocked) end),
-        ok = compartment_call(Critical, fun() -> compartment_sends(ToBest, blocked) end),
-        ok = compartment_call(Gate, fun() -> compartment_sends(ToCritical ++ ToBest, allowed) end),
-        compartment_deliveries(40),
-        %% Send from a best-effort process to the bridge, not just from the controller.
-        ok = compartment_call(Best,
-                              fun() -> Gate ! {forward, Critical, bridged}, ok end),
-        receive {delivered, Critical, bridged} -> ok after 5000 -> ct:fail(no_bridge) end,
-        ok = compartment_call(Best, fun() -> compartment_children([1, 2, 3, 4]) end),
-        receive
-            {delivered, _, blocked} -> ct:fail(cross_zone_delivery);
-            {unexpected, _, Msg} -> ct:fail({unexpected_message, Msg})
-        after 100 ->
-            ok
-        end,
         compartment_badarg(fun() -> erlang:system_info({compartment_service, -1}) end),
         compartment_badarg(fun() -> erlang:system_info({compartment_service, 64}) end),
         compartment_service_test()
@@ -514,7 +489,7 @@ compartment_wait_for_floor(Floor, Deadline) ->
             compartment_wait_for_floor(Floor, Deadline)
     end.
 
-compartment_worker(Observer) ->
+compartment_worker() ->
     receive
         {call, From, Ref, Fun} ->
             Result = try Fun() of
@@ -523,16 +498,7 @@ compartment_worker(Observer) ->
                          Class:Reason:Stack -> {exception, Class, Reason, Stack}
                      end,
             From ! {Ref, Result},
-            compartment_worker(Observer);
-        {probe, Tag} ->
-            Observer ! {delivered, self(), Tag},
-            compartment_worker(Observer);
-        {forward, To, Tag} ->
-            To ! {probe, Tag},
-            compartment_worker(Observer);
-        Msg ->
-            Observer ! {unexpected, self(), Msg},
-            compartment_worker(Observer)
+            compartment_worker()
     end.
 
 compartment_call(Pid, Fun) ->
@@ -550,28 +516,6 @@ compartment_badarg(Fun) ->
         Result -> ct:fail({expected_badarg, Result})
     catch
         error:badarg -> ok
-    end.
-
-compartment_sends(Destinations, Tag) ->
-    Msg = {probe, Tag},
-    lists:foreach(
-      fun(To) ->
-              Msg = To ! Msg,
-              Msg = erlang:send(To, Msg),
-              ok = erlang:send(To, Msg, []),
-              ok = erlang:send(To, Msg, [nosuspend, noconnect]),
-              ok = erlang:send(To, Msg, [priority])
-      end, Destinations),
-    ok.
-
-compartment_deliveries(0) ->
-    ok;
-compartment_deliveries(N) ->
-    receive
-        {delivered, _, allowed} -> compartment_deliveries(N - 1);
-        {delivered, _, blocked} -> ct:fail(cross_zone_delivery)
-    after 5000 ->
-        ct:fail({missing_allowed_messages, N})
     end.
 
 compartment_children(Allowed) ->
