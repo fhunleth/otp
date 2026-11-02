@@ -141,9 +141,10 @@ int ERTS_WRITE_UNLIKELY(erts_no_aux_work_threads);
 #define ERTS_MAX_COMPARTMENTS 64
 #define ERTS_COMPARTMENT_PERIOD_US 100000
 
-int erts_compartments_enabled = 0;
+int erts_compartment_reservations = 0;
 static struct {
     int configured;
+    Eterm name;
     Uint budget;
     Sint64 credit;
     Uint inflight;
@@ -157,50 +158,10 @@ static Uint compartment_min_schedulers = 1;
 static Uint compartment_last_selected;
 static void get_no_runqs(int *, int *);
 
-static Uint
-compartment_config_number(char **cursor, Uint limit)
-{
-    Uint value = 0;
-    char *p = *cursor;
-
-    if (*p < '0' || *p > '9')
-        erts_exit(1, "Invalid ERL_COMPARTMENTS number\n");
-    do {
-        Uint digit = *p++ - '0';
-        if (value > limit / 10 ||
-            (value == limit / 10 && digit > limit % 10))
-            erts_exit(1, "ERL_COMPARTMENTS number out of range\n");
-        value = value * 10 + digit;
-    } while (*p >= '0' && *p <= '9');
-    *cursor = p;
-    return value;
-}
-
 static void
-init_compartments(int no_schedulers, int no_schedulers_online)
+init_compartments(int no_schedulers)
 {
-    char config[4096], capacity[32], *p;
-    size_t size = sizeof(config);
-    int result, i;
-    Uint64 total = 0, floor;
-
-    result = erts_sys_explicit_8bit_getenv("ERL_COMPARTMENTS", config, &size);
-    if (result == 0)
-        return;
-    if (result != 1 || !config[0])
-        goto bad_config;
-    if (no_schedulers != no_schedulers_online)
-        erts_exit(1,
-                  "ERL_COMPARTMENTS requires all normal schedulers online\n");
-
-    size = sizeof(capacity);
-    if (erts_sys_explicit_8bit_getenv("ERL_COMPARTMENT_CAPACITY", capacity, &size) != 1)
-        erts_exit(1, "ERL_COMPARTMENTS requires ERL_COMPARTMENT_CAPACITY "
-                  "(reductions per scheduler per 100 ms)\n");
-    p = capacity;
-    compartment_capacity = compartment_config_number(&p, (Uint32) ~((Uint32) 0));
-    if (*p || compartment_capacity < CONTEXT_REDS)
-        goto bad_config;
+    int i;
 
     compartment_queued =
         erts_alloc_permanent_cache_aligned(ERTS_ALC_T_RUNQS,
@@ -212,38 +173,33 @@ init_compartments(int no_schedulers, int no_schedulers_online)
                       ERTS_LOCK_FLAGS_PROPERTY_STATIC |
                       ERTS_LOCK_FLAGS_CATEGORY_SCHEDULER);
     compartments[0].configured = 1;
-
-    p = config;
-    for (;;) {
-        Uint id = compartment_config_number(&p, ERTS_MAX_COMPARTMENTS - 1);
-        Uint budget;
-        if (!id || compartments[id].configured || *p++ != ':')
-            goto bad_config;
-        budget = compartment_config_number(&p, (Uint32) ~((Uint32) 0));
-        if (budget && budget < CONTEXT_REDS)
-            goto bad_config;
-        compartments[id].configured = 1;
-        compartments[id].budget = budget;
-        compartments[id].credit = (Sint64) budget * ERTS_COMPARTMENT_PERIOD_US;
-        total += budget;
-        if (!*p)
-            break;
-        if (*p++ != ',')
-            goto bad_config;
-    }
-    if (total > (Uint64) no_schedulers * compartment_capacity)
-        erts_exit(1, "ERL_COMPARTMENTS reservations exceed declared capacity\n");
-    floor = (2 * total + compartment_capacity - 1) / compartment_capacity;
-    compartment_min_schedulers = (Uint) MAX(1, MIN(no_schedulers, floor));
+    compartments[0].name = am_CompartmentSystem;
     compartment_credit_time = erts_os_monotonic_time();
+}
 
-    erts_compartments_enabled = 1;
-    return;
+static int
+compartment_id(Eterm name, int create)
+{
+    int id, free_id = -1;
 
-bad_config:
-    erts_exit(1,
-              "Invalid ERL_COMPARTMENTS; expected id:reductions_per_100ms,... "
-              "(nonzero budgets and capacity must be at least CONTEXT_REDS)\n");
+    erts_spin_lock(&compartment_lock);
+    for (id = 0; id < ERTS_MAX_COMPARTMENTS; id++) {
+        if (compartments[id].configured) {
+            if (compartments[id].name == name)
+                goto done;
+        } else if (free_id < 0) {
+            free_id = id;
+        }
+    }
+    id = -1;
+    if (create && free_id >= 0) {
+        id = free_id;
+        compartments[id].name = name;
+        compartments[id].configured = 1;
+    }
+done:
+    erts_spin_unlock(&compartment_lock);
+    return id;
 }
 
 static void
@@ -296,9 +252,9 @@ compartment_account(ErtsSchedulerData *esdp, Process *p, Uint reductions)
 }
 
 static void
-compartment_queue_change(ErtsRunQueue *rq, Process *p, int change)
+compartment_queue_change(ErtsRunQueue *rq, Process *p, int prio, int change)
 {
-    if (!ERTS_RUNQ_IX_IS_DIRTY(rq->ix))
+    if (!ERTS_RUNQ_IX_IS_DIRTY(rq->ix) && prio == PRIORITY_NORMAL)
         erts_atomic32_add_nob(&compartment_queued[p->compartment *
                                                erts_no_schedulers + rq->ix],
                               change);
@@ -310,27 +266,48 @@ erts_compartment_info(Process *p)
     Eterm *hp;
     Eterm budget;
     Uint hsz = 3;
-    if (!erts_compartments_enabled)
-        return am_undefined;
-    erts_bld_uint(NULL, &hsz, compartments[p->compartment].budget);
+    Uint value;
+    Eterm name;
+    erts_spin_lock(&compartment_lock);
+    value = compartments[p->compartment].budget;
+    name = compartments[p->compartment].name;
+    erts_spin_unlock(&compartment_lock);
+    erts_bld_uint(NULL, &hsz, value);
     hp = HAlloc(p, hsz);
-    budget = erts_bld_uint(&hp, NULL, compartments[p->compartment].budget);
-    return TUPLE2(hp, make_small(p->compartment), budget);
+    budget = erts_bld_uint(&hp, NULL, value);
+    return TUPLE2(hp, name, budget);
 }
 
 Eterm
-erts_compartment_service_info(Process *p, Uint id)
+erts_compartment_names(Process *p)
+{
+    Eterm names[ERTS_MAX_COMPARTMENTS], result = NIL, *hp;
+    int id, count = 0;
+    erts_spin_lock(&compartment_lock);
+    for (id = 0; id < ERTS_MAX_COMPARTMENTS; id++)
+        if (compartments[id].configured)
+            names[count++] = compartments[id].name;
+    erts_spin_unlock(&compartment_lock);
+    hp = HAlloc(p, 2 * count);
+    while (count--) {
+        result = CONS(hp, names[count], result);
+        hp += 2;
+    }
+    return result;
+}
+
+Eterm
+erts_compartment_service_info(Process *p, Eterm name)
 {
     Uint64 reductions;
-    Uint budget, credit, inflight;
+    Uint budget, credit, inflight, capacity, floor;
     int active;
     Eterm *hp, values[8];
     Uint hsz = 9;
-    int i;
+    int i, id = compartment_id(name, 0);
     ErtsMonotonicTime now;
 
-    if (!erts_compartments_enabled || id >= ERTS_MAX_COMPARTMENTS ||
-        !compartments[id].configured)
+    if (id < 0)
         return THE_NON_VALUE;
     now = erts_os_monotonic_time();
     erts_spin_lock(&compartment_lock);
@@ -339,11 +316,13 @@ erts_compartment_service_info(Process *p, Uint id)
     credit = compartments[id].credit / ERTS_COMPARTMENT_PERIOD_US;
     inflight = compartments[id].inflight;
     reductions = compartments[id].reductions;
+    capacity = compartment_capacity;
+    floor = compartment_min_schedulers;
     erts_spin_unlock(&compartment_lock);
     get_no_runqs(&active, NULL);
     {
         Uint64 integers[8] = {budget, reductions, credit, inflight, 100,
-                             compartment_capacity, compartment_min_schedulers, active};
+                             capacity, floor, active};
         for (i = 0; i < 8; i++)
             erts_bld_uint64(NULL, &hsz, integers[i]);
         hp = HAlloc(p, hsz);
@@ -4184,8 +4163,7 @@ enqueue_process(ErtsRunQueue *runq, int prio, Process *p)
 	rpq = &runq->procs.prio[prio];
     }
     enqueue_process_internal(rpq, p);
-    if (erts_compartments_enabled)
-        compartment_queue_change(runq, p, 1);
+    compartment_queue_change(runq, p, prio, 1);
 }
 
 static ERTS_INLINE void
@@ -4215,8 +4193,7 @@ unqueue_process(ErtsRunQueue *runq,
     ERTS_LC_ASSERT(erts_lc_runq_is_locked(runq));
     unqueue_process_no_update_lengths(rpq, prev_proc, proc);
     erts_dec_runq_len(runq, rqi, prio);
-    if (erts_compartments_enabled)
-        compartment_queue_change(runq, proc, -1);
+    compartment_queue_change(runq, proc, prio, -1);
 }
 
 static ERTS_INLINE Process *
@@ -4274,14 +4251,15 @@ check_requeue_process(ErtsRunQueue *rq, int prio_q)
 }
 
 static Process *
-dequeue_compartment_service(ErtsSchedulerData *esdp, ErtsRunQueue *rq,
-                            erts_aint32_t *statep)
+select_compartment_service(ErtsSchedulerData *esdp, ErtsRunQueue *rq,
+                           Process *candidate, erts_aint32_t *statep)
 {
     Uint selected = 0, owner = 0, offset;
     Sint64 greatest_lag = -1;
     ErtsRunQueue *source;
     Process *p = NULL;
-    int prio_q;
+    ErtsRunPrioQueue *rpq;
+    Process *prev;
     ErtsMonotonicTime now = erts_os_monotonic_time();
 
     erts_spin_lock(&compartment_lock);
@@ -4300,11 +4278,13 @@ dequeue_compartment_service(ErtsSchedulerData *esdp, ErtsRunQueue *rq,
         if (lag <= greatest_lag)
             continue;
         for (ix = 0; ix < erts_no_schedulers; ix++) {
-            Uint candidate = (rq->ix + ix) % erts_no_schedulers;
+            Uint queue_ix = (rq->ix + ix) % erts_no_schedulers;
+            /* The ordinary priority selector has already dequeued candidate. */
             if (erts_atomic32_read_nob(&compartment_queued[id *
-                                      erts_no_schedulers + candidate]) > 0) {
+                                      erts_no_schedulers + queue_ix]) > 0 ||
+                (queue_ix == rq->ix && candidate->compartment == id)) {
                 selected = id;
-                owner = candidate;
+                owner = queue_ix;
                 greatest_lag = lag;
                 break;
             }
@@ -4319,6 +4299,8 @@ dequeue_compartment_service(ErtsSchedulerData *esdp, ErtsRunQueue *rq,
     erts_spin_unlock(&compartment_lock);
     if (!selected)
         return NULL;
+    if (selected == candidate->compartment && owner == rq->ix)
+        return candidate;
 
     source = ERTS_RUNQ_IX(owner);
     /* Never hold two run-queue locks or acquire one under the service lock. */
@@ -4326,32 +4308,23 @@ dequeue_compartment_service(ErtsSchedulerData *esdp, ErtsRunQueue *rq,
         erts_runq_unlock(rq);
         erts_runq_lock(source);
     }
-    for (prio_q = PRIORITY_MAX; prio_q <= PRIORITY_NORMAL; prio_q++) {
-        ErtsRunPrioQueue *rpq = &source->procs.prio[prio_q];
-        Process *prev = NULL;
-        p = rpq->first;
-        while (p) {
-            if (p->compartment == selected) {
-                erts_aint32_t state = erts_atomic32_read_nob(&p->state);
-                int prio = ERTS_PSFLGS_GET_PRQ_PRIO(state);
-                if (prio == PRIORITY_LOW && --p->schedule_count > 0 &&
-                    p != rpq->last) {
-                    unqueue_process_no_update_lengths(rpq, prev, p);
-                    enqueue_process_internal(rpq, p);
-                    prev = NULL;
-                    p = rpq->first;
-                    continue;
-                }
-                if (source == rq || erts_try_change_runq_proc(p, rq)) {
-                    unqueue_process(source, rpq, &source->procs.prio_info[prio],
-                                    prio, prev, p);
-                    *statep = state;
-                    goto selected_process;
-                }
+    rpq = &source->procs.prio[PRIORITY_NORMAL];
+    prev = NULL;
+    p = rpq->first;
+    while (p) {
+        if (p->compartment == selected) {
+            erts_aint32_t state = erts_atomic32_read_nob(&p->state);
+            if (ERTS_PSFLGS_GET_PRQ_PRIO(state) == PRIORITY_NORMAL &&
+                (source == rq || erts_try_change_runq_proc(p, rq))) {
+                unqueue_process(source, rpq,
+                                &source->procs.prio_info[PRIORITY_NORMAL],
+                                PRIORITY_NORMAL, prev, p);
+                *statep = state;
+                goto selected_process;
             }
-            prev = p;
-            p = p->next;
         }
+        prev = p;
+        p = p->next;
     }
 selected_process:
     if (source != rq) {
@@ -4852,8 +4825,7 @@ try_steal_task_from_victim(ErtsRunQueue *rq, ErtsRunQueue *vrq, Uint32 flags, Pr
                 erts_aint32_t state = erts_atomic32_read_acqb(&proc->state);
                 int prio = (int) ERTS_PSFLGS_GET_PRQ_PRIO(state);
                 unqueue_process_no_update_lengths(rpq, prev_proc, proc);
-                if (erts_compartments_enabled)
-                    compartment_queue_change(vrq, proc, -1);
+                compartment_queue_change(vrq, proc, prio, -1);
                 if (!first_stolen_proc) {
                     first_stolen_proc = proc;
                     first_stolen_proc_prio = prio;
@@ -4869,11 +4841,6 @@ try_steal_task_from_victim(ErtsRunQueue *rq, ErtsRunQueue *vrq, Uint32 flags, Pr
 	    proc = proc->next;
 	}
         if (first_stolen_proc) {
-            if (erts_compartments_enabled) {
-                Process *proc;
-                for (proc = first_stolen_proc; proc; proc = proc->next)
-                    compartment_queue_change(rq, proc, 1);
-            }
             for (int i = 0; i < ERTS_NO_PROC_PRIO_LEVELS; ++i) {
                 if (n_procs_stolen[i] > 0) {
                     ErtsRunQueueInfo *rqi = &vrq->procs.prio_info[i];
@@ -4890,6 +4857,12 @@ try_steal_task_from_victim(ErtsRunQueue *rq, ErtsRunQueue *vrq, Uint32 flags, Pr
 
             erts_runq_lock(rq);
             if (first_stolen_proc) {
+                Process *proc;
+                for (proc = first_stolen_proc; proc; proc = proc->next) {
+                    erts_aint32_t state = erts_atomic32_read_nob(&proc->state);
+                    compartment_queue_change(rq, proc,
+                                             ERTS_PSFLGS_GET_PRQ_PRIO(state), 1);
+                }
                 for (int i = 0; i < ERTS_NO_PROC_PRIO_LEVELS; ++i) {
                     if (n_procs_stolen[i] > 0) {
                         ErtsRunQueueInfo *rqi = &rq->procs.prio_info[i];
@@ -5416,7 +5389,7 @@ check_balance(ErtsRunQueue *c_rq)
     }
 
     if (!forced && half_full_scheds != blnc_no_rqs) {
-	int min = erts_compartments_enabled ? compartment_min_schedulers : 1;
+	int min = compartment_min_schedulers;
 	if (min < half_full_scheds)
 	    min = half_full_scheds;
 	if (full_scheds) {
@@ -6365,6 +6338,7 @@ init_scheduler_data(ErtsSchedulerData* esdp, int num,
     esdp->virtual_reds = 0;
     esdp->compartment_claim = 0;
     esdp->compartment_claim_id = 0;
+    esdp->compartment_accounting = 0;
     esdp->cpu_id = -1;
 
     erts_init_atom_cache_map(&esdp->atom_cache_map);
@@ -6417,7 +6391,7 @@ erts_init_scheduling(int no_schedulers, int no_schedulers_online, int no_poll_th
     size_t size_runqs;
     erts_aint32_t set_schdlr_sspnd_change_flags;
 
-    init_compartments(no_schedulers, no_schedulers_online);
+    init_compartments(no_schedulers);
 
     init_misc_op_list_alloc();
     init_proc_sys_task_queues_alloc();
@@ -9050,6 +9024,136 @@ erts_multi_scheduling_blockers(Process *p, int normal)
     return res;
 }
 
+BIF_RETTYPE erts_internal_compartment_configure_3(BIF_ALIST_3)
+{
+    Eterm incoming_names[ERTS_MAX_COMPARTMENTS];
+    Uint incoming_budgets[ERTS_MAX_COMPARTMENTS];
+    Eterm names[ERTS_MAX_COMPARTMENTS], list = BIF_ARG_2, error = am_ok;
+    Uint budgets[ERTS_MAX_COMPARTMENTS], capacity = 0;
+    Uint64 total = 0, floor;
+    int count = 0, i, j;
+    int replace = BIF_ARG_3 == am_true;
+    int keep_capacity = BIF_ARG_1 == am_undefined;
+    ErtsSchedulerData *esdp = erts_proc_sched_data(BIF_P);
+
+    if (BIF_ARG_3 != am_true && BIF_ARG_3 != am_false)
+        BIF_ERROR(BIF_P, BADARG);
+    if (BIF_ARG_1 != am_undefined &&
+        (!term_to_Uint(BIF_ARG_1, &capacity) ||
+         capacity > (Uint32) ~((Uint32) 0) ||
+         (capacity && capacity < CONTEXT_REDS)))
+        BIF_ERROR(BIF_P, BADARG);
+    while (is_list(list)) {
+        Eterm entry = CAR(list_val(list)), *tp;
+        Uint budget;
+        if (count == ERTS_MAX_COMPARTMENTS - 1 ||
+            !is_tuple_arity(entry, 2))
+            BIF_ERROR(BIF_P, BADARG);
+        tp = tuple_val(entry);
+        if (is_not_atom(tp[1]) || tp[1] == am_CompartmentSystem ||
+            !term_to_Uint(tp[2], &budget) ||
+            budget > (Uint32) ~((Uint32) 0) ||
+            (budget && budget < CONTEXT_REDS))
+            BIF_ERROR(BIF_P, BADARG);
+        for (i = 0; i < count; i++)
+            if (incoming_names[i] == tp[1])
+                BIF_ERROR(BIF_P, BADARG);
+        incoming_names[count] = tp[1];
+        incoming_budgets[count++] = budget;
+        list = CDR(list_val(list));
+    }
+    if (is_not_nil(list))
+        BIF_ERROR(BIF_P, BADARG);
+
+    /* Configuration is rare: stop managed threads instead of publishing versions.
+     * Only atoms and integers are retained while the process lock is released. */
+    erts_proc_unlock(BIF_P, ERTS_PROC_LOCK_MAIN);
+    esdp->current_process = NULL;
+    erts_thr_progress_block();
+    if (keep_capacity)
+        capacity = compartment_capacity;
+    for (i = 0; i < ERTS_MAX_COMPARTMENTS; i++) {
+        names[i] = compartments[i].configured ? compartments[i].name : THE_NON_VALUE;
+        budgets[i] = replace ? 0 : compartments[i].budget;
+    }
+    for (i = 0; i < count; i++) {
+        int free_id = -1;
+        for (j = 1; j < ERTS_MAX_COMPARTMENTS; j++) {
+            if (names[j] == incoming_names[i])
+                break;
+            if (is_non_value(names[j]) && free_id < 0)
+                free_id = j;
+        }
+        if (j == ERTS_MAX_COMPARTMENTS) {
+            if (free_id < 0) {
+                error = am_system_limit;
+                goto done;
+            }
+            j = free_id;
+        }
+        names[j] = incoming_names[i];
+        budgets[j] = incoming_budgets[i];
+    }
+    for (i = 1; i < ERTS_MAX_COMPARTMENTS; i++)
+        total += budgets[i];
+    if (total > (Uint64) erts_no_schedulers * capacity) {
+        error = am_compartment_capacity_exceeded;
+        goto done;
+    }
+    if (total) {
+        int incompatible;
+        erts_mtx_lock(&schdlr_sspnd.mtx);
+        incompatible = schdlr_sspnd.online.normal != erts_no_schedulers ||
+            schdlr_sspnd.curr_online.normal != erts_no_schedulers ||
+            schdlr_sspnd.msb.ongoing || schdlr_sspnd.nmsb.ongoing ||
+            erts_atomic32_read_nob(&schdlr_sspnd.changing);
+        erts_mtx_unlock(&schdlr_sspnd.mtx);
+        if (!incompatible) {
+            int max = erts_ptab_max(&erts_proc);
+            for (i = 0; i < max; i++) {
+                Process *p = erts_pix2proc(i);
+                if (p && erts_proc_runq_is_bound(p)) {
+                    incompatible = 1;
+                    break;
+                }
+            }
+        }
+        if (incompatible) {
+            error = am_compartment_scheduler_configuration;
+            goto done;
+        }
+    }
+    for (i = 0; i < ERTS_MAX_COMPARTMENTS; i++) {
+        compartments[i].configured = !is_non_value(names[i]);
+        compartments[i].name = names[i];
+        compartments[i].budget = budgets[i];
+        compartments[i].credit = 0;
+        /* Existing claims must still be released by their dispatches. */
+    }
+    compartment_capacity = capacity;
+    floor = total ? (2 * total + capacity - 1) / capacity : 1;
+    compartment_min_schedulers = (Uint) MAX(1, MIN(erts_no_schedulers, floor));
+    compartment_credit_time = erts_os_monotonic_time();
+    erts_compartment_reservations = total != 0;
+done:
+    if (error == am_ok && total) {
+        set_no_active_runqs(erts_no_schedulers);
+        for (i = 0; i < erts_no_schedulers; i++) {
+            ErtsRunQueue *rq = ERTS_RUNQ_IX(i);
+            ERTS_RUNQ_FLGS_UNSET(rq, ERTS_RUNQ_FLG_INACTIVE);
+            wake_scheduler(rq);
+        }
+    }
+    erts_thr_progress_unblock();
+    erts_proc_lock(BIF_P, ERTS_PROC_LOCK_MAIN);
+    esdp->current_process = BIF_P;
+    if (error != am_ok) {
+        Eterm *hp = HAlloc(BIF_P, 3);
+        BIF_RET(TUPLE2(hp, am_error, error));
+    }
+    BIF_RET(am_ok);
+}
+
 static void *
 sched_thread_func(void *vesdp)
 {
@@ -10020,7 +10124,7 @@ Process *erts_schedule(ErtsSchedulerData *esdp, Process *p, int calls)
 	rq = erts_get_runq_current(esdp);
 
 	p->reds += actual_reds;
-        if (erts_compartments_enabled && is_normal_sched)
+        if (is_normal_sched && esdp->compartment_accounting)
             compartment_account(esdp, p, actual_reds);
 
 	state = erts_atomic32_read_nob(&p->state);
@@ -10123,8 +10227,7 @@ Process *erts_schedule(ErtsSchedulerData *esdp, Process *p, int calls)
 	ErtsMigrationPath *mp;
 
 	if (is_normal_sched) {
-            if (erts_compartments_enabled)
-                compartment_release_claim(esdp);
+            compartment_release_claim(esdp);
 
 	    if (esdp->check_time_reds >= ERTS_CHECK_TIME_REDS)
 		(void) erts_get_monotonic_time(esdp);
@@ -10230,11 +10333,6 @@ Process *erts_schedule(ErtsSchedulerData *esdp, Process *p, int calls)
                 else {
                     /* Normal scheduler */
                     p = NULL;
-                    if (erts_compartments_enabled) {
-                        p = dequeue_compartment_service(esdp, rq, &state);
-                        if (p)
-                            goto execute_process;
-                    }
                     if (try_steal_task(rq, &p)) {
                         if (p) {
                             state = erts_atomic32_read_acqb(&p->state);
@@ -10326,13 +10424,8 @@ Process *erts_schedule(ErtsSchedulerData *esdp, Process *p, int calls)
 	    int prio_q;
 	    int qmask, qbit;
 
-            if (erts_compartments_enabled && is_normal_sched) {
+            if (is_normal_sched) {
                 compartment_release_claim(esdp);
-                if (!(ERTS_RUNQ_FLGS_GET_NOB(rq) & ERTS_RUNQ_FLG_INACTIVE)) {
-                    p = dequeue_compartment_service(esdp, rq, &state);
-                    if (p)
-                        goto execute_process;
-                }
             }
 	    flags = ERTS_RUNQ_FLGS_GET_NOB(rq);
 	    qmask = (int) (flags & ERTS_RUNQ_FLGS_PROCS_QMASK);
@@ -10383,6 +10476,19 @@ Process *erts_schedule(ErtsSchedulerData *esdp, Process *p, int calls)
 #endif
 
 execute_process:
+            if (is_normal_sched) {
+                esdp->compartment_accounting =
+                    ERTS_PSFLGS_GET_PRQ_PRIO(state) == PRIORITY_NORMAL;
+                if (erts_compartment_reservations && esdp->compartment_accounting &&
+                    !(ERTS_RUNQ_FLGS_GET_NOB(rq) & ERTS_RUNQ_FLG_INACTIVE)) {
+                    Process *service = select_compartment_service(esdp, rq, p, &state);
+                    if (service && service != p) {
+                        enqueue_process(rq, PRIORITY_NORMAL, p);
+                        non_empty_runq(rq);
+                        p = service;
+                    }
+                }
+            }
 	    if (is_normal_sched) {
 		psflg_band_mask = ~(((erts_aint32_t) 1) << (ERTS_PSFLGS_GET_PRQ_PRIO(state)
 							    + ERTS_PSFLGS_IN_PRQ_MASK_OFFSET));
@@ -10777,7 +10883,7 @@ execute_process:
             ASSERT(actual_reds >= 0);
             esdp->virtual_reds = 0;
             p->reds += actual_reds;
-            if (erts_compartments_enabled && is_normal_sched)
+            if (is_normal_sched && esdp->compartment_accounting)
                 compartment_account(esdp, p, actual_reds);
             ERTS_PROC_REDUCTIONS_EXECUTED(esdp, rq,
                                           (int) ERTS_PSFLGS_GET_USR_PRIO(state),
@@ -12711,16 +12817,11 @@ erts_parse_spawn_opts(ErlSpawnOpts *sop, Eterm opts_list, Eterm *tag,
                     result = -1;
                 else
                     sop->scheduler = (int) scheduler;
-            } else if (arg == am_compartment && is_small(val)) {
-                Sint id = signed_val(val);
+            } else if (arg == am_compartment && is_atom(val)) {
                 if (sop->flags & SPO_COMPARTMENT)
                     sop->multi_set = !0;
                 sop->flags |= SPO_COMPARTMENT;
-                if (!erts_compartments_enabled || id < 0 ||
-                    id >= ERTS_MAX_COMPARTMENTS || !compartments[id].configured)
-                    result = -1;
-                else
-                    sop->compartment = (Uint) id;
+                sop->compartment = val;
             } else if (arg == am_reply) {
                 if (!message_opt)
                     result = -1;
@@ -12853,11 +12954,12 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
     }
 
     if (so->flags & SPO_COMPARTMENT) {
-        if (!erts_compartments_enabled || !parent || parent->compartment != 0) {
-            so->error_code = BADARG;
+        int id = compartment_id(so->compartment, 1);
+        if (id < 0) {
+            so->error_code = SYSTEM_LIMIT;
             goto error;
         }
-        compartment = so->compartment;
+        compartment = (Uint) id;
     }
 
     if (so->flags & SPO_USE_ARGS) {
@@ -12895,7 +12997,7 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
     }
     ASSERT(rq);
 
-    if (erts_compartments_enabled && (so->flags & SPO_SCHEDULER) &&
+    if (erts_compartment_reservations && (so->flags & SPO_SCHEDULER) &&
         so->scheduler) {
         so->error_code = BADARG;
         goto error;

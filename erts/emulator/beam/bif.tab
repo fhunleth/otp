@@ -858,4 +858,7 @@ bif records:get_field_names/1
 bif records:is_exported/1
 bif records:create/4
 bif records:update/4
+
 bif records:get_definition/2
+
+bif erts_internal:compartment_configure/3

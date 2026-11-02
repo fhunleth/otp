@@ -2496,8 +2496,8 @@ info_1_tuple(Process* BIF_P,	/* Pointer to current process. */
 
     sel = *tp++;
 
-    if (sel == am_compartment_service && arity == 2 && is_small(tp[0])) {
-        ret = erts_compartment_service_info(BIF_P, unsigned_val(tp[0]));
+    if (sel == am_compartment_service && arity == 2 && is_atom(tp[0])) {
+        ret = erts_compartment_service_info(BIF_P, tp[0]);
         if (is_non_value(ret))
             goto badarg;
         return ret;
@@ -2792,6 +2792,8 @@ BIF_RETTYPE system_info_1(BIF_ALIST_1)
 	BIF_RET(make_small(esdp->no));
     } else if (BIF_ARG_1 == am_compartment) {
         BIF_RET(erts_compartment_info(BIF_P));
+    } else if (BIF_ARG_1 == am_compartments) {
+        BIF_RET(erts_compartment_names(BIF_P));
     } else if (BIF_ARG_1 == am_compat_rel) {
 	ASSERT(erts_compat_rel > 0);
 	BIF_RET(make_small(erts_compat_rel));

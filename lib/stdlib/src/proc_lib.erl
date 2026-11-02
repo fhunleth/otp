@@ -102,6 +102,7 @@ is _not_ part of these options.
 """.
 -type start_spawn_option() :: 'link'
                             | {'priority', erlang:priority_level()}
+                            | {'compartment', atom()}
                             | {'fullsweep_after', non_neg_integer()}
                             | {'min_heap_size', non_neg_integer()}
                             | {'min_bin_vheap_size', non_neg_integer()}

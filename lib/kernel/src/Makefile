@@ -61,6 +61,7 @@ MODULES = \
 	auth \
 	code \
 	code_server \
+	compartment \
 	data_publisher \
 	disk_log \
 	disk_log_1 \

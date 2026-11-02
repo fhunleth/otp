@@ -44,8 +44,12 @@
 %% Returns: {ok, Pid} | {error, Reason} (Pid is unregistered)
 %%-----------------------------------------------------------------
 start_link(ApplData, Type) ->
-    proc_lib:start_link(application_master, init,
-			[self(), ApplData, Type]).
+    try proc_lib:start_link(application_master, init,
+                            [self(), ApplData, Type], infinity,
+                            [{compartment, ApplData#appl_data.name}])
+    catch
+        error:system_limit -> {error, system_limit}
+    end.
 
 start_type() ->
     group_leader() ! {start_type, self()},

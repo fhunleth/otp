@@ -32,6 +32,8 @@
 -module(erts_internal).
 -moduledoc false.
 
+-export([compartment_configure/3]).
+
 -export([await_port_send_result/3]).
 -export([cmp_term/2]).
 -export([map_to_tuple_keys/1, term_type/1, map_hashmap_children/1,
@@ -1199,4 +1201,7 @@ breakpoint(Module, Function, Arity, Line) ->
     Line :: pos_integer(),
     ResumeAction :: fun(() -> ok).
 notify_breakpoint_hit(_, _, _) ->
+    erlang:nif_error(undefined).
+
+compartment_configure(_Capacity, _Reservations, _Replace) ->
     erlang:nif_error(undefined).

@@ -552,9 +552,16 @@ init(Init, Kernel) ->
                         {error, Error} ->
                             Init ! {ack, self(), {error, to_string(Error)}};
 			{ok, NewS} ->
-			    Init ! {ack, self(), ok},
-			    gen_server:enter_loop(?MODULE, [], NewS,
-						  {local, ?AC})
+                            case catch configure_compartments() of
+                                ok ->
+                                    Init ! {ack, self(), ok},
+                                    gen_server:enter_loop(?MODULE, [], NewS,
+                                                         {local, ?AC});
+                                ConfigError ->
+                                    Init ! {ack, self(),
+                                            {error, to_string(
+                                              {bad_compartment_config, ConfigError})}}
+                            end
 		    end;
 		{error, ErrorStr} ->
 		    Str = lists:flatten(io_lib:format("invalid config data: ~ts", [ErrorStr])),
@@ -574,6 +581,12 @@ init(Init, Kernel) ->
 	    Init ! {ack, self(), {error, to_string(ReasonStr)}}
     end.
 
+
+configure_compartments() ->
+    case get_env(kernel, compartments) of
+        undefined -> ok;
+        {ok, Policy} -> compartment:configure(Policy)
+    end.
 
 %% Check the syntax of the .config file
 %%  [{ApplicationName, [{Parameter, Value}]}].
@@ -1445,7 +1458,12 @@ spawn_starter(Appl, S, Type) ->
             Reply = {info, {not_running, NotRunning}},
             gen_server:cast(?AC, {application_started, Appl#appl.name, Reply});
         false ->
-            application_master:start_link(Appl#appl.appl_data, Type)
+            case application_master:start_link(Appl#appl.appl_data, Type) of
+                {ok, _Pid} -> ok;
+                {error, Reason} ->
+                    gen_server:cast(?AC, {application_started, Appl#appl.name,
+                                         {error, Reason}})
+            end
     end.
 
 spawn_stopper(AppName, Id, Type) ->

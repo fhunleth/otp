@@ -707,6 +707,7 @@ struct ErtsSchedulerData_ {
     int virtual_reds;
     Uint compartment_claim;
     Uint compartment_claim_id;
+    int compartment_accounting;
     int cpu_id;			/* >= 0 when bound */
     ErtsAuxWorkData aux_work_data;
     ErtsAtomCacheMap atom_cache_map;
@@ -1565,7 +1566,7 @@ typedef struct {
     Uint max_heap_size;         /* Maximum heap size in words */
     Uint max_heap_flags;        /* Maximum heap flags (kill | log) */
     int scheduler;
-    Uint compartment;
+    Eterm compartment;
 
 } ErlSpawnOpts;
 
@@ -2138,9 +2139,10 @@ Eterm erts_get_schedulers_binds(Process *c_p);
 Eterm erts_set_cpu_topology(Process *c_p, Eterm term);
 Eterm erts_bind_schedulers(Process *c_p, Eterm how);
 ErtsRunQueue *erts_schedid2runq(Uint);
-extern int erts_compartments_enabled;
+extern int erts_compartment_reservations;
 Eterm erts_compartment_info(Process *);
-Eterm erts_compartment_service_info(Process *, Uint);
+Eterm erts_compartment_names(Process *);
+Eterm erts_compartment_service_info(Process *, Eterm);
 Process *erts_schedule(ErtsSchedulerData *, Process*, int);
 void erts_schedule_misc_op(void (*)(void *), void *);
 int erts_parse_spawn_opts(ErlSpawnOpts *sop, Eterm opts_list, Eterm *tag,

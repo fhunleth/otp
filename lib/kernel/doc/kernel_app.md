@@ -104,6 +104,15 @@ The following configuration parameters are defined for the Kernel application.
 For more information about configuration parameters, see file
 [`app`](app.md).
 
+- **`compartments = Policy`{: #compartments }** - Experimental process
+  compartment policy, applied before the Kernel application starts.
+  `Policy` is a list containing `{capacity, ReductionsPerSchedulerPer100ms}` and
+  `{reservations, [{Name, ReductionsPer100ms}]}`. Names are global atoms;
+  applications with application masters default to their application-name atoms.
+  Unconfigured compartments are best effort with accounting enabled.
+  See `m:compartment` for configuration examples, runtime updates, diagnostics,
+  limits, and scheduling semantics.
+
 - **`connect_all = true | false`{: #connect_all }** - If enabled (`true`), which
   also is the default, `m:global` will actively connect to all nodes that
   becomes known to it. Note that you also want to enable

@@ -10730,6 +10730,7 @@ Process max heap size configuration. For more info see
       | monitor
       | {monitor, MonitorOpts :: [monitor_option()]}
       | {priority, Level :: priority_level()}
+      | {compartment, Name :: atom()}
       | {fullsweep_after, Number :: non_neg_integer()}
       | {min_heap_size, Size :: non_neg_integer()}
       | {min_bin_vheap_size, VSize :: non_neg_integer()}
@@ -10929,6 +10930,9 @@ Options:
 - **`{monitor, MonitorOpts}`** - Monitors the new process with options (like
   [`monitor(process, Pid, MonitorOpts)`](`monitor/3`) does). A
   `{Pid, MonitorRef}` tuple will be returned instead of just a `Pid`.
+
+- **`{compartment, Name}`** - Selects an experimental atom-named compartment.
+  If omitted, membership is inherited from the parent. See `m:compartment`.
 
 - **`{priority, Level}`** - Sets the priority of the new process. Equivalent to
   executing [`process_flag(priority, Level)`](#process_flag_priority)

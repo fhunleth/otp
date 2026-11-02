@@ -2075,7 +2075,7 @@ BIF_RETTYPE process_flag_2(BIF_ALIST_2)
        if (sched < 0 || erts_no_schedulers < sched)
 	   goto error;
 
-       if (erts_compartments_enabled && sched)
+       if (erts_compartment_reservations && sched)
            goto error;
 
        if (sched == 0) {
@@ -4977,7 +4977,7 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
     Sint n;
 
     if (BIF_ARG_1 == am_multi_scheduling) {
-        if (erts_compartments_enabled)
+        if (erts_compartment_reservations)
             goto error;
 	if (BIF_ARG_2 == am_block || BIF_ARG_2 == am_unblock
 	    || BIF_ARG_2 == am_block_normal || BIF_ARG_2 == am_unblock_normal) {
@@ -5021,7 +5021,7 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	Sint old_no;
 	if (!is_small(BIF_ARG_2))
 	    goto error;
-        if (erts_compartments_enabled &&
+        if (erts_compartment_reservations &&
             signed_val(BIF_ARG_2) != erts_no_schedulers)
             goto error;
 	switch (erts_set_schedulers_online(BIF_P,
